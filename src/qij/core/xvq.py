@@ -28,6 +28,11 @@ from .differences import forward_step, perturbed_weights
 
 _KAPPA_REF = 2.7
 
+# Row batch for the second-BMU repair, matching `influence_model`'s cap:
+# it bounds the (rows, M_used) distance block at tens of megabytes rather
+# than gigabytes at the cost study's largest sample size.
+_BMU2_BATCH_CAP = 4096
+
 
 @dataclass
 class XVQ:
@@ -110,8 +115,14 @@ def _resolve_bmu2(
     best-matching unit pointed to a prototype dropped as empty (dropping
     empty receptive fields does not repair `bmu2` for the survivors).
     Each such point gets the nearest LIVE prototype other than its own
-    `bmu`, by Euclidean distance in Z. O(N_missing * M_used), never
-    O(N * M_used).
+    `bmu`, by Euclidean distance in Z.
+
+    Batched over rows: the number of points needing repair is not always
+    small -- when the quantizer drops many empty receptive fields it can
+    approach N -- and the distance block is then (N, M_used), about 1.4 GB
+    at the cost study's largest sample size. The batch bounds it at a few
+    tens of megabytes whatever fraction is missing, for the same reason
+    `influence_model.psi0` and `uncertainty` are batched.
     """
     bmu2 = np.array(bmu2, dtype=int, copy=True)
     missing = bmu2 < 0
@@ -120,14 +131,15 @@ def _resolve_bmu2(
 
     Zm = Z[missing]
     bmu_m = bmu[missing]
-    D2 = (
-        np.sum(Zm ** 2, axis=1)[:, None]
-        + np.sum(centers ** 2, axis=1)[None, :]
-        - 2.0 * Zm @ centers.T
-    )
-    rows = np.arange(D2.shape[0])
-    D2[rows, bmu_m] = np.inf
-    bmu2[missing] = np.argmin(D2, axis=1)
+    centers_sq = np.sum(centers ** 2, axis=1)[None, :]
+    nearest = np.empty(Zm.shape[0], dtype=int)
+    for start in range(0, Zm.shape[0], _BMU2_BATCH_CAP):
+        sl = slice(start, start + _BMU2_BATCH_CAP)
+        Zb = Zm[sl]
+        D2 = np.sum(Zb ** 2, axis=1)[:, None] + centers_sq - 2.0 * Zb @ centers.T
+        D2[np.arange(D2.shape[0]), bmu_m[sl]] = np.inf
+        nearest[sl] = np.argmin(D2, axis=1)
+    bmu2[missing] = nearest
     return bmu2
 
 
