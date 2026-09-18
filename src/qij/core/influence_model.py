@@ -537,6 +537,13 @@ def psi0(model: InfluenceModel, Z: np.ndarray) -> np.ndarray:
     Cost: O(N * M_X_used) per coordinate (one kernel row and one
     matrix-vector product per point, against that coordinate's own
     design); never O(N * M_X_used^2).
+
+    Batched over rows of Z (`_UNCERTAINTY_BATCH_CAP` = 4096), for the
+    same reason `uncertainty` is: unbatched, the (N, M_X_used) distance
+    matrix and the kernel formed from it are each about 1.4 GB at the
+    cost study's largest sample size (N = 76997, M_X_used ~ 2300), and
+    both are live at once, per coordinate. Batched they are about 75 MB.
+    The arithmetic per row is identical either way.
     """
     Z = np.asarray(Z, dtype=float)
     if Z.ndim == 1:
@@ -547,14 +554,18 @@ def psi0(model: InfluenceModel, Z: np.ndarray) -> np.ndarray:
     q = len(model.centers)
 
     out = np.empty((N, q), dtype=float)
-    for c in range(q):
-        if model.constant_path[c]:
-            out[:, c] = model.const_value[c]
-        else:
-            H = _basis(Zw, int(model.m[c]))
-            D = cdist(Zw, model.centers[c])
-            K = _matern32(D, float(model.width[c]))
-            out[:, c] = H @ model.beta[c] + K @ model.alpha[c]
+    batch = _UNCERTAINTY_BATCH_CAP
+    for start in range(0, N, batch):
+        sl = slice(start, start + batch)
+        Zc = Zw[sl]
+        for c in range(q):
+            if model.constant_path[c]:
+                out[sl, c] = model.const_value[c]
+            else:
+                Hc = _basis(Zc, int(model.m[c]))
+                Dc = cdist(Zc, model.centers[c])
+                Kc = _matern32(Dc, float(model.width[c]))
+                out[sl, c] = Hc @ model.beta[c] + Kc @ model.alpha[c]
     return out
 
 
