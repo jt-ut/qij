@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qij"
+version = "0.1.0"
+description = "Variance for estimators without a closed-form influence function"
+requires-python = ">=3.9,<3.10"
+dependencies = [
+    "numpy",
+    "scipy",
+    "pandas",
+    "pyarrow",
+    "pyyaml",
+    "joblib",
+    "h5py",
+    "matplotlib",
+    "vqlp @ file:///Users/jtaylor/Dropbox/Software/JT_Py_Pkgs/vector-quantizer-lp",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+qij = ["data/*.npz", "data/*.h5"]
