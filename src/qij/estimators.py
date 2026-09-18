@@ -665,20 +665,54 @@ class IMF:
 
             shape_bounds = self._SHAPE_BOUNDS
 
+            # The objective and its exact gradient. `_imf_score_hessian`'s psi
+            # is the per-observation score d log f / d theta, so the gradient
+            # of -sum w log f is -sum w psi. Supplying it matters: without a
+            # jacobian the optimizer differences an objective that contains
+            # the continuity root-find, so every gradient carries that
+            # solver's tolerance as noise and the search wanders to a bound.
+            # On the infeasible path the gradient points back toward the box's
+            # centre -- a zero gradient there would read as a stationary point
+            # and stall the search (spec QIJ_dgp_imf.md Sec 0).
+            box_centre = 0.5 * (bounds_lo + bounds_hi)
+
             def nll(params):
                 alpha, Mstar, p = params
                 if Mstar <= 0 or p <= 0:
-                    return _NLL_PENALTY
+                    return _NLL_PENALTY, np.asarray(params, dtype=float) - box_centre
                 shape, scale, converged = _imf_continuity(tau, alpha, Mstar, p, shape_bounds)
                 if not converged:
-                    return _NLL_PENALTY
+                    return _NLL_PENALTY, np.asarray(params, dtype=float) - box_centre
                 density = _imf_joint_density(masses, shape, scale, alpha, Mstar, p, tau)
                 density = np.maximum(density, _DENSITY_FLOOR)
-                return -float(np.dot(w, np.log(density)))
+                value = -float(np.dot(w, np.log(density)))
+                psi = _imf_score_hessian(masses, w, tau, alpha, Mstar, p, shape, scale)[0]
+                grad = -(w[:, None] * psi).sum(axis=0)
+                if not np.all(np.isfinite(grad)):
+                    return _NLL_PENALTY, np.asarray(params, dtype=float) - box_centre
+                return value, grad
+
+            # The exact Hessian of the objective. `_imf_score_hessian`'s A is
+            # the negative Hessian of the weighted-MEAN log density, so the
+            # objective's own Hessian is sum(w) * A (verified elementwise
+            # against a numerical Jacobian of the gradient). A non-finite or
+            # infeasible point returns the identity, which a trust-region
+            # method reads as "no curvature information here" and falls back
+            # to a gradient step, rather than the zero matrix, which it would
+            # read as a flat direction of unbounded trust.
+            def hess(params):
+                alpha, Mstar, p = params
+                shape, scale, converged = _imf_continuity(tau, alpha, Mstar, p, shape_bounds)
+                if not converged:
+                    return np.eye(3)
+                A = _imf_score_hessian(masses, w, tau, alpha, Mstar, p, shape, scale)[1]
+                H = float(np.sum(w)) * np.asarray(A, dtype=float)
+                return H if np.all(np.isfinite(H)) else np.eye(3)
 
             res = optimize.minimize(
-                nll, x0, method='L-BFGS-B', bounds=self.bounds,
-                options={'maxiter': 400, 'ftol': self.eta ** 2, 'gtol': 1e-8},
+                nll, x0, method='trust-constr', jac=True, hess=hess,
+                bounds=optimize.Bounds(bounds_lo, bounds_hi),
+                options={'maxiter': 400, 'gtol': 1e-8, 'xtol': self.eta ** 2},
             )
             if not res.success:
                 return np.full(5, np.nan)

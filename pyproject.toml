@@ -16,7 +16,11 @@ dependencies = [
     "joblib",
     "h5py",
     "matplotlib",
-    "vqlp @ file:///Users/jtaylor/Dropbox/Software/JT_Py_Pkgs/vector-quantizer-lp",
+    # vqlp is the vector quantizer, from github.com/jt-ut/vqlp. Named plainly
+    # rather than pinned to a path or a URL, so it resolves against whatever
+    # is installed: an editable checkout on a workstation, a normal install
+    # from GitHub on a cluster. Install it before this package.
+    "vqlp",
 ]
 
 [tool.setuptools.packages.find]
