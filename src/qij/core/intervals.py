@@ -41,12 +41,17 @@ def percentile_interval(replicates: np.ndarray, level: float) -> np.ndarray:
     """
     The bootstrap's percentile interval h^boot_level (glossary): the
     level*100% interval from the empirical quantiles of `replicates`
-    (b, q) over its replicate axis (axis 0). `replicates` may be any
-    prefix of the B replicates, which is what the cost-against-
-    replicates frontier needs. Returns (q, 2), [lo, hi].
+    (b, q) over its replicate axis (axis 0), ignoring failed (NaN)
+    replicates -- a resample that loses what identifies the fit is
+    excluded from the interval, not propagated into it (plan section
+    4, the rare-support ruling). `replicates` may be any prefix of the
+    B replicates, which is what the cost-against-replicates frontier
+    needs. A coordinate with no converged replicate in `replicates`
+    returns NaN, correctly: there is nothing to form an interval from.
+    Returns (q, 2), [lo, hi].
     """
     replicates = np.asarray(replicates, dtype=float)
     alpha = 1.0 - level
-    lo = np.quantile(replicates, alpha / 2.0, axis=0)
-    hi = np.quantile(replicates, 1.0 - alpha / 2.0, axis=0)
+    lo = np.nanquantile(replicates, alpha / 2.0, axis=0)
+    hi = np.nanquantile(replicates, 1.0 - alpha / 2.0, axis=0)
     return np.stack([lo, hi], axis=-1)

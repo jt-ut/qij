@@ -238,7 +238,10 @@ def _f2_panel_a_rows(oracle_estimands: list) -> list:
     per-draw oracle variance V_oracle_<o>: QIJ's log(V_tot_hat/V_oracle)
     and the bootstrap's log(V_boot/V_oracle), V_boot the per-draw
     variance of boot.h5's replicates (a numpy computation on the
-    product's own array, not a re-run)."""
+    product's own array, not a re-run), over the replicates that
+    converged -- a NaN replicate (plan section 4: a resample that drops
+    the rare support) is excluded, not treated as a value; the failure
+    fractions themselves are T1's, not this panel's."""
     rows = []
     for e in oracle_estimands:
         loaded = _load_draws(e["dir"], [e["output"]])
@@ -247,7 +250,7 @@ def _f2_panel_a_rows(oracle_estimands: list) -> list:
         ok = np.isfinite(v_oracle) & (v_oracle > 0) & np.isfinite(v_tot_hat) & (v_tot_hat > 0)
         log_qij = np.log(v_tot_hat[ok] / v_oracle[ok])
 
-        v_boot = np.var(loaded["theta_boot"][:, :, 0], axis=1, ddof=1)
+        v_boot = np.nanvar(loaded["theta_boot"][:, :, 0], axis=1, ddof=1)
         okb = np.isfinite(v_oracle) & (v_oracle > 0) & np.isfinite(v_boot) & (v_boot > 0)
         log_boot = np.log(v_boot[okb] / v_oracle[okb])
 

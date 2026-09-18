@@ -28,12 +28,15 @@ the `Estimand` protocol/class machinery, `check_scale_invariance` /
 the IMF's joint (alpha, Mstar, p, tau) profile-likelihood search and its
 warm-start cache / pool start / second start / `x0_extra` / `skip_data_
 start` (tau is fixed, never chosen from the data, and every evaluation
-depends only on its own `(X, w)`), the lognormal low-mass alternative (the
-paper uses gamma only), and the IMF's analytic influence (the old
-`IFDGPEstimand.psi`/`A` machinery) -- `IMF` has none, per plan Sec 4. The
-old `IMFDGPEstimand.__call__` returned zeros from a failed inner solve in
-two places (`psi`'s `_solve_constraints` check and the FP-pattern `A`
-default); both become the NaN-on-failure convention here.
+depends only on its own `(X, w)`), and the lognormal low-mass alternative
+(the paper uses gamma only). `IMF.influence` is new here and supersedes
+the old `IMFDGPEstimand.psi`: the per-observation score is the same
+object, but the Jacobian `A` is analytic rather than a central finite
+difference of the total score, which needs the second-order
+implicit-function term written out. The old `IMFDGPEstimand.psi` returned
+zeros from a failed inner solve in two places (the `_solve_constraints`
+check and the FP-pattern `A` default); both become the NaN-on-failure
+convention here.
 """
 
 from __future__ import annotations
@@ -588,6 +591,22 @@ class IMF:
         self.tau = float(tau)
         self.bounds = tuple((float(lo), float(hi)) for lo, hi in bounds)
 
+    def _at_box(self, params: np.ndarray) -> bool:
+        """True when any of the three free (alpha, Mstar, p) parameters
+        lies within `eta` -- the estimator's own declared accuracy, 1e-6 --
+        of either end of its own bound interval. A fit that runs to a
+        bound is not a stationary point of the objective (the weighted
+        score there is not zero), so it is not a root of anything and
+        neither the fit nor its influence means anything there (plan
+        Sec 4 ruling): the box stays, but the evaluation becomes a
+        counted failure like any other, not a silent number."""
+        for v, (lo, hi) in zip(params, self.bounds):
+            if abs(v - lo) <= self.eta * (1.0 + abs(lo)):
+                return True
+            if abs(v - hi) <= self.eta * (1.0 + abs(hi)):
+                return True
+        return False
+
     def _moment_start(self, m_hi: np.ndarray, w_hi: np.ndarray,
                        masses: np.ndarray, w: np.ndarray) -> np.ndarray:
         """Method-of-moments start, computed once from (X, w) (plan Sec 4):
@@ -664,6 +683,9 @@ class IMF:
             if not res.success:
                 return np.full(5, np.nan)
 
+            if self._at_box(res.x):
+                return np.full(5, np.nan)
+
             alpha, Mstar, p = (float(v) for v in res.x)
             shape, scale, converged = _imf_continuity(tau, alpha, Mstar, p, shape_bounds)
             if not converged:
@@ -671,3 +693,253 @@ class IMF:
             return np.array([alpha, Mstar, p, shape, scale])
         except Exception:
             return np.full(5, np.nan)
+
+    def influence(self, X: np.ndarray, w: np.ndarray) -> np.ndarray:
+        """The analytic influence (N, 5) at the fitted parameters.
+
+        `IF = A^-1 psi` with `psi` the per-observation score of the
+        objective `__call__` minimizes and `A` the negative Hessian of the
+        weighted-mean log density, the same M-estimator construction as
+        `_pareto_shape_influence` and `_mvt_nu_influence`; the two derived
+        outputs follow by the delta method, `IF_lam = J IF_theta`.
+        NaN (N, 5) whenever the fit, the continuity solve or the solve
+        against `A` fails, and also whenever the fit is at its box: a
+        non-root evaluation (plan Sec 4 ruling) makes the influence there
+        meaningless. O(N) arithmetic in one vectorized pass plus O(1)
+        work, never a loop over the N masses.
+        """
+        try:
+            theta = self(X, w)
+            if not np.all(np.isfinite(theta)) or self._at_box(theta[:3]):
+                return np.full((len(X), 5), np.nan)
+            masses = np.asarray(X, dtype=float).reshape(-1)
+            alpha, Mstar, p, shape, scale = (float(v) for v in theta)
+            psi, A, J = _imf_score_hessian(
+                masses, np.asarray(w, dtype=float), self.tau,
+                alpha, Mstar, p, shape, scale)
+            IF_free = np.linalg.solve(A, psi.T).T
+            IF = np.hstack([IF_free, IF_free @ J.T])
+            if not np.all(np.isfinite(IF)):
+                return np.full((len(X), 5), np.nan)
+            return IF
+        except Exception:
+            return np.full((len(X), 5), np.nan)
+
+
+# Composite Gauss-Legendre rule for the incomplete gamma's order derivatives
+# (`_gamma_order_moments`): panels x nodes, and the log-scale margin outside
+# which the integrand is below exp(-_QUAD_MARGIN) of its peak.
+_QUAD_Z, _QUAD_W = np.polynomial.legendre.leggauss(32)
+_QUAD_PANELS = 8
+_QUAD_MARGIN = 60.0
+
+
+def _gamma_order_moments(a: float, x: float) -> tuple:
+    """(G_a/G, G_aa/G, x G_x/G) for the upper incomplete gamma G = Gamma(a, x).
+
+    The derivatives in the ORDER,
+
+        G_a  = d Gamma(a,x)/da = int_x^inf t^(a-1) e^-t log(t)   dt
+        G_aa =                   int_x^inf t^(a-1) e^-t log(t)^2 dt,
+
+    have no elementary closed form: truncating at x breaks the Mellin
+    identity that gives d Gamma(a)/da = Gamma(a) digamma(a); the order
+    recurrence bottoms out on the exponential integral E_1 at a = 1 and
+    has no base case at all for non-integer a; the known closed form is a
+    Meijer G-function. `scipy.special` differentiates `gammaincc` in x
+    only. **This one quantity is therefore evaluated by QUADRATURE ON ITS
+    OWN DEFINING INTEGRAL** -- an exact evaluation of the true object, not
+    a finite difference of the estimator, of `gammaincc`, or of anything
+    else. Under t = exp(z),
+
+        int_x^inf t^(a-1) e^-t log(t)^k dt = int_{log x}^inf e^phi(z) z^k dz,
+        phi(z) = a z - e^z,
+
+    so one set of nodes serves k = 0, 1, 2. phi is strictly concave, with
+    its maximum at log(a) when a > 0 and log(a) > log(x) and at log(x)
+    otherwise; the range is trimmed by bisection to where phi exceeds its
+    maximum less `_QUAD_MARGIN` and covered by composite Gauss-Legendre.
+    Needed at exactly one (a, x) per fit -- O(1), outside every
+    per-observation and per-bin path. Everything returned is a ratio to G,
+    formed as exp(phi - phi_max), so no intermediate overflows however
+    large G is, and the x-scaled `x G_x/G` stays O(max(|a|, x)) even where
+    x underflows toward zero.
+    """
+    z_min = log(x)
+    z_peak = max(z_min, log(a)) if a > 0.0 else z_min
+    phi_max = a * z_peak - exp(z_peak)
+    cut = phi_max - _QUAD_MARGIN
+
+    lo, hi = z_min, z_peak
+    if a * z_min - exp(z_min) < cut:
+        for _ in range(80):
+            mid = 0.5 * (lo + hi)
+            if a * mid - exp(mid) < cut:
+                lo = mid
+            else:
+                hi = mid
+    z_lo = lo
+
+    span = 1.0
+    for _ in range(10):
+        if a * (z_peak + span) - exp(z_peak + span) <= cut:
+            break
+        span *= 2.0
+    lo, hi = z_peak, z_peak + span
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        if a * mid - exp(mid) > cut:
+            lo = mid
+        else:
+            hi = mid
+    z_hi = hi
+
+    edges = np.linspace(z_lo, z_hi, _QUAD_PANELS + 1)
+    half = 0.5 * np.diff(edges)
+    mid = 0.5 * (edges[:-1] + edges[1:])
+    z = mid[:, None] + half[:, None] * _QUAD_Z[None, :]
+    g = np.exp(a * z - np.exp(z) - phi_max) * (half[:, None] * _QUAD_W[None, :])
+    i0 = float(g.sum())
+    i1 = float((g * z).sum())
+    i2 = float((g * z * z).sum())
+    return i1 / i0, i2 / i0, -exp(a * z_min - x - phi_max) / i0
+
+
+def _imf_score_hessian(masses: np.ndarray, w: np.ndarray, tau: float,
+                        alpha: float, Mstar: float, p: float,
+                        shape: float, scale: float) -> tuple:
+    """(psi (N, 3), A (3, 3), J (2, 3)) for the IMF at its fitted parameters.
+
+    The objective `IMF.__call__` minimizes is, once the C0 continuity
+    condition is substituted back (`c_rel` is 1 identically in theta, so
+    the high-mass log density is exactly the truncated Schechter's),
+
+        W loglik = sum_{m<=tau} w log gamma_pdf(m; lam(theta))
+                 + sum_{m> tau} w [ log f_raw(m; theta) - log norm(theta) ],
+
+    with lam = (shape, scale) and norm = Gamma((alpha+1)/p, (tau/Mstar)^p)/p.
+    The normalization does NOT cancel: it cancels inside `c_rel * schechter`,
+    but continuity pins gamma_pdf(tau) to f_raw(tau)/norm and puts it back.
+    So the low-mass block reaches theta only through lam, the high-mass
+    block not at all, and
+
+        psi_lo = J' grad_lam log gamma_pdf(m)
+        psi_hi = grad_theta [ log f_raw(m) - log norm ]
+        A      = -(1/W) [ sum_lo w (J' H_lam J + sum_u grad_lam,u K_u)
+                        + sum_hi w Hess_theta (log f_raw(m) - log norm) ]
+
+    where J = d lam/d theta and K_u = d2 lam_u/d theta2 come from the
+    implicit function theorem on the two continuity conditions. Both are
+    additively separable, h_r = A_r(lam) - B_r(theta) -- the C1 condition
+    because `norm` cancels from f_raw'(tau)/f_raw(tau), the C0 condition
+    in its log form, whose zero set is the ratio form the bracketed solve
+    drives to zero -- so every mixed second partial d2h/dlam dtheta
+    vanishes and the second-order term collapses to
+
+        A_lam K_{:,ab} = [ B_r,ab - (J' A_r,lamlam J)_ab ]_{r=1,2}.
+
+    B_1 = f_raw'(tau)/f_raw(tau) and B_2 = log(f_raw(tau)/norm), the
+    latter being the high-mass log density at m = tau, so it shares the
+    high-mass gradient and Hessian code exactly.
+
+    Derivatives of x = (tau/Mstar)^p are carried reduced by x and those of
+    Gamma scaled by G, which keeps every intermediate O(1) where x reaches
+    1e-70 and G_x/G reaches 1e+70. O(N) in one vectorized pass over the
+    masses plus O(1) work; the quadrature of `_gamma_order_moments` runs
+    once per call.
+    """
+    L = log(tau / Mstar)
+    x = exp(p * L)
+    order = (alpha + 1.0) / p
+    r1, r2, cx = _gamma_order_moments(order, x)
+
+    # x-reduced derivatives of x (X_c = dx/dtheta_c / x) and derivatives of
+    # the incomplete gamma's order.
+    X = np.array([0.0, -p / Mstar, L])
+    XH = np.array([[0.0, 0.0, 0.0],
+                   [0.0, p * (p + 1.0) / Mstar ** 2, -(1.0 + p * L) / Mstar],
+                   [0.0, -(1.0 + p * L) / Mstar, L * L]])
+    Ord = np.array([1.0 / p, 0.0, -order / p])
+    OrdH = np.array([[0.0, 0.0, -1.0 / p ** 2],
+                     [0.0, 0.0, 0.0],
+                     [-1.0 / p ** 2, 0.0, 2.0 * order / p ** 2]])
+
+    # log norm = log Gamma(order, x) - log p, its gradient and Hessian.
+    s_oo = r2 - r1 * r1
+    s_ox = cx * (log(x) - r1)
+    s_xx = cx * (order - 1.0 - x) - cx * cx
+    g_norm = r1 * Ord + cx * X
+    g_norm[2] -= 1.0 / p
+    H_norm = (s_oo * np.outer(Ord, Ord)
+              + s_ox * (np.outer(Ord, X) + np.outer(X, Ord))
+              + s_xx * np.outer(X, X)
+              + r1 * OrdH + cx * XH)
+    H_norm[2, 2] += 1.0 / p ** 2
+
+    def hi_grad(m):
+        """grad_theta [log f_raw(m) - log norm], (k, 3)."""
+        ell = np.log(m / Mstar)
+        u = np.exp(p * ell)
+        return np.column_stack([ell - g_norm[0],
+                                (p * u - alpha - 1.0) / Mstar - g_norm[1],
+                                -u * ell - g_norm[2]])
+
+    def hi_hess(m, wt):
+        """sum_k wt_k Hess_theta [log f_raw(m_k) - log norm], (3, 3)."""
+        ell = np.log(m / Mstar)
+        u = np.exp(p * ell)
+        s_w = float(wt.sum())
+        s_u = float(np.dot(wt, u))
+        s_ul = float(np.dot(wt, u * ell))
+        s_ull = float(np.dot(wt, u * ell * ell))
+        H = np.zeros((3, 3))
+        H[0, 1] = H[1, 0] = -s_w / Mstar
+        H[1, 1] = (s_w * (alpha + 1.0) - p * (p + 1.0) * s_u) / Mstar ** 2
+        H[1, 2] = H[2, 1] = (s_u + p * s_ul) / Mstar
+        H[2, 2] = -s_ull
+        return H - s_w * H_norm
+
+    tau_arr = np.full(1, tau)
+    B2_g = hi_grad(tau_arr)[0]
+    B2_H = hi_hess(tau_arr, np.ones(1))
+
+    e_p = np.array([0.0, 0.0, 1.0])
+    B1_g = np.array([1.0 / tau,
+                     -(p / tau) * x * X[1],
+                     -(x / tau) * (1.0 + p * L)])
+    B1_H = -(1.0 / tau) * (p * x * XH
+                           + x * (np.outer(e_p, X) + np.outer(X, e_p)))
+
+    # The continuity conditions' lam-side: A_1 = (shape-1)/tau - 1/scale,
+    # A_2 = log gamma_pdf(tau; shape, scale).
+    trigamma = float(special.polygamma(1, shape))
+    dg_shape = log(tau) - log(scale) - digamma(shape)
+    dg_scale = tau / scale ** 2 - shape / scale
+    A_lam = np.array([[1.0 / tau, 1.0 / scale ** 2],
+                      [dg_shape, dg_scale]])
+    A1_ll = np.array([[0.0, 0.0], [0.0, -2.0 / scale ** 3]])
+    A2_ll = np.array([[-trigamma, -1.0 / scale],
+                      [-1.0 / scale, -2.0 * tau / scale ** 3 + shape / scale ** 2]])
+
+    J = np.linalg.solve(A_lam, np.vstack([B1_g, B2_g]))
+    rhs = np.stack([B1_H - J.T @ A1_ll @ J, B2_H - J.T @ A2_ll @ J])
+    K = np.linalg.solve(A_lam, rhs.reshape(2, 9)).reshape(2, 3, 3)
+
+    low = masses <= tau
+    m_lo, w_lo = masses[low], w[low]
+    g_shape = np.log(m_lo) - log(scale) - digamma(shape)
+    g_scale = m_lo / scale ** 2 - shape / scale
+
+    psi = np.empty((masses.size, 3))
+    psi[low] = np.column_stack([g_shape, g_scale]) @ J
+    psi[~low] = hi_grad(masses[~low])
+
+    s_w = float(w_lo.sum())
+    s_m = float(np.dot(w_lo, m_lo))
+    H_lam = np.array([[-s_w * trigamma, -s_w / scale],
+                      [-s_w / scale,
+                       -2.0 * s_m / scale ** 3 + s_w * shape / scale ** 2]])
+    g_lam = np.array([float(np.dot(w_lo, g_shape)), float(np.dot(w_lo, g_scale))])
+    H = (J.T @ H_lam @ J + g_lam[0] * K[0] + g_lam[1] * K[1]
+         + hi_hess(masses[~low], w[~low]))
+    return psi, -H / float(w.sum()), J

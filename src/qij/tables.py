@@ -71,7 +71,13 @@ def _outputs(truth_df):
 def _load_draws(estimator_dir, outputs):
     """Load and join truth.parquet, qij.parquet and boot.h5 for one
     (dataset, estimator) directory, aligned on `s` and on `outputs`'
-    order. No interval is read here -- see `_compute_intervals`."""
+    order. No interval is read here -- see `_compute_intervals`.
+
+    `boot_n_failed` and `B` are boot.h5's per-draw failed-replicate
+    count and its replicate count; `qij_n_failed` is qij.parquet's
+    per-draw failed-evaluation count -- both shared across a vector
+    estimator's outputs, as their products store them, and read here
+    for T1's failure fractions (plan section 4's rare-support ruling)."""
     estimator_dir = Path(estimator_dir)
     truth = pd.read_parquet(estimator_dir / "truth.parquet")
     qij_df = pd.read_parquet(estimator_dir / "qij.parquet")
@@ -81,6 +87,7 @@ def _load_draws(estimator_dir, outputs):
         theta_bootstrap = h5f["theta"][...]
         s_bootstrap = h5f["s"][...]
         wall_time_bootstrap = h5f["wall_time"][...]
+        n_failed_bootstrap = h5f["n_failed"][...]
         bootstrap_outputs = list(h5f.attrs["outputs"])
 
     bootstrap_row = pd.Series(np.arange(len(s_bootstrap)), index=s_bootstrap)
@@ -88,6 +95,7 @@ def _load_draws(estimator_dir, outputs):
     col_order = [bootstrap_outputs.index(o) for o in outputs]
     theta_bootstrap = theta_bootstrap[order][:, :, col_order]
     wall_time_bootstrap = wall_time_bootstrap[order]
+    n_failed_bootstrap = n_failed_bootstrap[order]
 
     has_oracle = f"V_oracle_{outputs[0]}" in df.columns
     return {
@@ -105,6 +113,9 @@ def _load_draws(estimator_dir, outputs):
         "L": df[[f"L_{o}" for o in outputs]].to_numpy(),
         "evaluations": df["evals_total"].to_numpy(),
         "normalized_rows": df["normalized_rows"].to_numpy(),
+        "boot_n_failed": n_failed_bootstrap,
+        "B": int(theta_bootstrap.shape[1]),
+        "qij_n_failed": df["n_failed"].to_numpy(),
     }
 
 
@@ -176,7 +187,8 @@ def t1(run_dir):
       coverage_bootstrap_0.95, coverage_bootstrap_0.95_se, n_coverage,
       width_ratio_0.95_median, L_median, evaluations_median,
       normalized_rows_median, wall_time_ratio_qij_over_bootstrap_median,
-      n_draws.
+      bootstrap_replicate_failure_fraction, qij_evaluation_failure_fraction,
+      draw_failure_fraction, n_draws.
 
     V_tot has two sources, both reported (plan section 8): the true
     sampling variance Var_s(theta_hat) over the draws in
@@ -197,6 +209,24 @@ def t1(run_dir):
     them (one column, not one per output), so those two medians repeat
     across an estimator's output rows -- the product's own structure,
     not a table artefact.
+
+    The rare-support ruling (plan section 4) requires both methods'
+    failure fractions to be visible rather than silently absorbed:
+    `bootstrap_replicate_failure_fraction` is the share of that
+    (dataset, estimator)'s bootstrap replicates that returned NaN
+    (boot.h5's per-draw `n_failed` against its `B`, pooled over
+    draws); `qij_evaluation_failure_fraction` is the share of QIJ
+    evaluations that failed (qij.parquet's per-draw `n_failed` against
+    `evals_total`, the evaluations that draw spent, pooled over
+    draws); `draw_failure_fraction` is, per output, the share of draws
+    excluded entirely because the full-data fit failed -- `theta_hat`
+    NaN in truth.parquet. These three are distinct: the first two
+    share both methods' per-replicate/per-evaluation failures within
+    the draws that were run at all, the third counts draws dropped
+    before either method could run on them. A failed draw's NaN
+    `theta_hat` already falls out of `v_tot_mc` (`np.nanvar` above),
+    so it is excluded from the truth product's variance without
+    special-casing here.
     """
     rows = []
     for dataset, estimator, estimator_dir in _product_dirs(run_dir):
@@ -226,6 +256,12 @@ def t1(run_dir):
         width_ratio = _safe_ratio(width_qij, width_bootstrap)
 
         wall_time_ratio = _safe_ratio(loaded["wall_time_qij"], loaded["wall_time_bootstrap"])
+
+        n_draws = len(loaded["s"])
+        bootstrap_replicate_failure_fraction = float(_safe_ratio(
+            np.sum(loaded["boot_n_failed"]), float(loaded["B"] * n_draws)))
+        qij_evaluation_failure_fraction = float(_safe_ratio(
+            np.sum(loaded["qij_n_failed"]), np.sum(loaded["evaluations"])))
 
         for j, output in enumerate(outputs):
             p_qij, se_qij, n_qij = _coverage_se(cov_qij[:, j])
@@ -257,7 +293,10 @@ def t1(run_dir):
                 "evaluations_median": np.nanmedian(loaded["evaluations"]),
                 "normalized_rows_median": np.nanmedian(loaded["normalized_rows"]),
                 "wall_time_ratio_qij_over_bootstrap_median": np.nanmedian(wall_time_ratio),
-                "n_draws": int(len(loaded["s"])),
+                "bootstrap_replicate_failure_fraction": bootstrap_replicate_failure_fraction,
+                "qij_evaluation_failure_fraction": qij_evaluation_failure_fraction,
+                "draw_failure_fraction": float(np.mean(np.isnan(loaded["theta_hat"][:, j]))),
+                "n_draws": n_draws,
             })
     return pd.DataFrame(rows)
 
