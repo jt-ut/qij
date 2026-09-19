@@ -5,9 +5,10 @@ no estimator is re-run, no dataset is redrawn.
 
     python scripts/make_figures.py <run_dir> [options]
 
-`<run_dir>` (a main or smoke run) supplies Figure A and Figure B directly.
-Figure C additionally needs the separate timing run (`--timing-dir`, one
-worker, one thread) for its corner wall-time annotation. Figure D needs
+`<run_dir>` (a main or smoke run) supplies Figure A, Figure B and Figure C
+directly -- Figure C's 19 September redesign measures both methods
+against the truth in evaluation-cost units, so it no longer needs a
+separate timing run. Figure D needs
 the cost-vs-N study's per-N products (`--cost-vs-n`), and, optionally, an
 IMF cost-vs-N sweep (`--cost-vs-n-imf`) to add its sweet-spot row --
 `_cost_dirs` finds the `N<size>` directories under each by globbing for
@@ -64,8 +65,6 @@ def _cost_dirs(root: str) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("run_dir", help="products directory from qij.study (e.g. a main or smoke run)")
-    parser.add_argument("--timing-dir", type=str, default=None,
-                        help="the one-worker, one-thread timing run, for Figure C's corner wall times")
     parser.add_argument("--cost-vs-n", type=str, default=None,
                         help="products directory from a cost_vs_n.yaml study run (Fundamental Plane), for Figure D")
     parser.add_argument("--cost-vs-n-imf", type=str, default=None,
@@ -81,9 +80,8 @@ def main() -> None:
     fig_b = figures.fig_b(args.run_dir)
     _save(fig_b, args.out_dir or args.run_dir, "fig_b")
 
-    if args.timing_dir:
-        fig_c = figures.fig_c(args.run_dir, args.timing_dir)
-        _save(fig_c, args.out_dir or args.run_dir, "fig_c")
+    fig_c = figures.fig_c(args.run_dir)
+    _save(fig_c, args.out_dir or args.run_dir, "fig_c")
 
     if args.cost_vs_n:
         cost_dirs = _cost_dirs(args.cost_vs_n)

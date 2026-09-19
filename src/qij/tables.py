@@ -25,6 +25,14 @@ own inputs, not a second-order-only cost -- but nothing in this module
 reads them any more; a run that carries them merges in and tables the
 same as a run that does not, no special casing needed either way.
 
+Comparison-set ruling (figure spec, "Comparison set"; plan §36.11, 19
+September 2026): every column that compares the two methods -- `t1`'s
+coverage of both, its width ratio, and `n_coverage`; `coverage_grid`'s
+pooled coverage of both -- is computed on the set of draws where BOTH
+methods' intervals are finite, never on each method's own separately
+sized valid set. `_comparison_mask` is that test, written once, and is
+the only place either table applies it.
+
 Cost is normalized in three layers (plan section 8), kept apart by
 construction rather than by a note to remember: (1) evaluation counts
 and normalized rows, exact and machine-independent; (2) wall time only
@@ -191,6 +199,28 @@ def _coverage_se(indicator):
     return p, se, n
 
 
+def _comparison_mask(qij_lo_hi, bootstrap_lo_hi):
+    """(n, q) boolean: True for a (draw, output) where BOTH methods'
+    intervals are finite -- the comparison-set ruling (figure spec,
+    "Comparison set"; plan §36.11, 19 September 2026). A draw whose
+    full-data fit failed has no QIJ interval, and is dropped from the
+    bootstrap's side too, even though `percentile_interval` may still
+    form and score one from its own converged replicates (an IMF box-
+    rule draw, e.g. s = 936, is exactly this case); a draw where QIJ's
+    stage-1 collapsed, or where the bootstrap has no converged replicate
+    at all, is dropped the same way. This is the conjunction of the SAME
+    finiteness test `_covered` already applies to each method on its
+    own -- not a second convention -- so a (draw, output) this marks
+    usable is exactly one where `_covered` returns a defined 0/1 for
+    both methods, never NaN for either. Called once here and once more
+    from `coverage_grid`; every column the ruling names (coverage of
+    both methods, the width ratio, `n_coverage`) is built by masking
+    with this, nowhere by re-deriving the test."""
+    qij_ok = np.isfinite(qij_lo_hi[..., 0]) & np.isfinite(qij_lo_hi[..., 1])
+    boot_ok = np.isfinite(bootstrap_lo_hi[..., 0]) & np.isfinite(bootstrap_lo_hi[..., 1])
+    return qij_ok & boot_ok
+
+
 # ---------------------------------------------------------------------------
 # T1
 # ---------------------------------------------------------------------------
@@ -267,24 +297,49 @@ def t1(run_dir):
     NaN by both routes at once (there is only one route once the
     interval itself is the test).
 
-    Because `n_qij_failed` is built from the exact same finiteness
-    mask `cov_qij` uses, the reconciliation is an identity, not an
-    empirical coincidence: `n_coverage = n_draws - n_qij_failed`
-    equals `n_qij` (`_coverage_se(cov_qij[:, j])`'s own valid count) by
-    construction, for every row, on both product shapes. This
-    superseded the previous `min(n_qij, n_bootstrap)`: across every
-    directory audited (plan §36.1) the bootstrap side never lost a
-    whole draw (`n_bootstrap == n_draws` always, `percentile_interval`
-    needs every one of a draw's replicates to fail before it returns
-    NaN), so the two formulas agree everywhere they have been checked
-    -- but `min(...)` only holds `n_draws - n_qij_failed == n_coverage`
-    because of that empirical fact, not because the arithmetic forces
-    it, and the ruling asks for the identity to hold by construction.
-    If a future run does lose whole draws on the bootstrap side, that
-    shows up in `bootstrap_replicate_failure_fraction` (below,
-    unchanged) as a nonzero rate with no corresponding `n_qij_failed`
-    count -- worth checking `n_bootstrap` directly at that point, since
-    `n_coverage` here is QIJ-side only.
+    `n_qij_failed` is built from the exact same finiteness mask
+    `cov_qij` uses, so `n_draws - n_qij_failed` equals `n_qij`
+    (`_coverage_se(cov_qij[:, j])`'s own valid count) by construction,
+    for every row, on both product shapes -- but that count is QIJ's
+    own, and is no longer what `n_coverage` reports (see below).
+
+    SUPERSEDED BY THE COMPARISON-SET RULING (figure spec, "Comparison
+    set"; plan §36.11, 19 September 2026). The paragraph above, and the
+    `min(n_qij, n_bootstrap)` it replaced (plan §36.2 ruling 5), both
+    took `n_coverage` to be QIJ-side only, resting on an audited
+    empirical fact: across every directory checked (plan §36.1) the
+    bootstrap side never lost a whole draw, `percentile_interval`
+    needing every one of a draw's replicates to fail before it returns
+    NaN. That fact does not cover the case the ruling was written for:
+    a draw whose full-data fit itself failed has no `theta_hat` and
+    therefore no QIJ interval, but `percentile_interval` still forms
+    and this table still SCORED one from its converged replicates on
+    that same draw -- on the IMF, `coverage_qij_0.95` stood on 969
+    draws and `coverage_bootstrap_0.95` on up to 1000, two different
+    populations averaged as though they were one (s = 936 is such a
+    draw: no full-data fit, no QIJ interval, a bootstrap interval
+    formed and scored anyway).
+
+    `n_coverage` is now the size of the COMMON set: `_comparison_mask`
+    applied to `qij_lo_hi`/`bootstrap_lo_hi`, True only where BOTH
+    methods' intervals are finite for that (draw, output). `cov_qij`
+    and `cov_bootstrap` are masked to that common set (`cov_qij_common`/
+    `cov_bootstrap_common` below) before `coverage_qij_0.95`,
+    `coverage_bootstrap_0.95` and `width_ratio_0.95_median` are computed
+    from them, so those three columns and `n_coverage` are always over
+    the identical set of draws, by construction, on both product
+    shapes and for both methods.
+
+    `n_qij_failed`/`qij_failure_fraction` below are UNCHANGED by this
+    ruling and stay computed from the UNMASKED `cov_qij` -- they are
+    QIJ's own failure count, a diagnostic of QIJ's construction alone,
+    not the comparison, and the ruling does not ask that diagnostic to
+    move. `n_coverage <= n_draws - n_qij_failed` in general now (with
+    equality exactly when the bootstrap never independently loses a
+    draw the common set would otherwise have kept): the old identity
+    between them is no longer asserted, since `n_coverage` can now be
+    smaller than QIJ's own valid count whenever the bootstrap fails a
+    draw QIJ did not.
 
     The rare-support ruling (plan section 4) requires both methods'
     failure fractions to be visible rather than silently absorbed:
@@ -377,9 +432,20 @@ def t1(run_dir):
         cov_qij = _covered(loaded["theta_true"], qij_lo_hi)
         cov_bootstrap = _covered(loaded["theta_true"], bootstrap_lo_hi)
 
+        # Comparison-set ruling (figure spec, "Comparison set"; plan
+        # §36.11): a draw where either method has no usable interval is
+        # dropped from the comparison for BOTH, so coverage and the
+        # width ratio are never averaged over two differently sized sets
+        # of draws. `common` masks `cov_qij`/`cov_bootstrap`/`width_ratio`
+        # alike; `cov_qij`/`cov_bootstrap` themselves (unmasked) stay
+        # around only for `n_qij_failed` below, QIJ's own diagnostic.
+        common = _comparison_mask(qij_lo_hi, bootstrap_lo_hi)
+        cov_qij_common = np.where(common, cov_qij, np.nan)
+        cov_bootstrap_common = np.where(common, cov_bootstrap, np.nan)
+
         width_qij = qij_lo_hi[..., 1] - qij_lo_hi[..., 0]
         width_bootstrap = bootstrap_lo_hi[..., 1] - bootstrap_lo_hi[..., 0]
-        width_ratio = _safe_ratio(width_qij, width_bootstrap)
+        width_ratio = np.where(common, _safe_ratio(width_qij, width_bootstrap), np.nan)
 
         wall_time_ratio = _safe_ratio(loaded["wall_time_qij"], loaded["wall_time_bootstrap"])
 
@@ -397,19 +463,25 @@ def t1(run_dir):
             np.nansum(loaded["qij_n_failed"]), np.nansum(loaded["evaluations"])))
 
         for j, output in enumerate(outputs):
-            p_qij, se_qij, n_qij = _coverage_se(cov_qij[:, j])
-            # n_bootstrap not used below (module docstring: n_coverage
-            # is QIJ-side only, plan §36.2 ruling 5) -- se_bootstrap
-            # above is already computed from cov_bootstrap's own valid
-            # entries, so the bootstrap side's own sample size is
-            # already correctly reflected in its own se without it.
-            p_bootstrap, se_bootstrap, _n_bootstrap = _coverage_se(cov_bootstrap[:, j])
-            # Plan §36.2 ruling 5: every draw whose QIJ interval is
-            # non-finite for this output, whatever produced it -- the
-            # same mask `cov_qij[:, j]`'s own NaNs already carry, so
-            # `n_qij_failed` and `n_qij` (above) partition `n_draws`
-            # exactly, by construction, not by checking it separately.
+            # QIJ's own failure diagnostic (plan §36.2 ruling 5, UNCHANGED
+            # by the comparison-set ruling): every draw whose QIJ interval
+            # is non-finite for this output, whatever produced it -- the
+            # same mask `cov_qij[:, j]`'s own NaNs already carry, computed
+            # from the UNMASKED `cov_qij`, so `n_qij_failed` counts QIJ's
+            # own construction alone, not the comparison with the bootstrap.
+            _p_qij_own, _se_qij_own, n_qij = _coverage_se(cov_qij[:, j])
             n_qij_failed = n_draws - n_qij
+
+            # Reported coverage/width columns: the common set only
+            # (comparison-set ruling, docstring above). `cov_qij_common`
+            # and `cov_bootstrap_common` are masked by the identical
+            # `common[:, j]`, and both are NaN everywhere `common[:, j]`
+            # is False and defined everywhere it is True, so their own
+            # valid counts from `_coverage_se` already agree with each
+            # other and with `n_coverage` below -- by construction, not
+            # by separately reconciling them.
+            p_qij, se_qij, n_coverage = _coverage_se(cov_qij_common[:, j])
+            p_bootstrap, se_bootstrap, _n_coverage_boot = _coverage_se(cov_bootstrap_common[:, j])
             rows.append({
                 "dataset": dataset, "estimator": estimator, "output": output,
                 "V_btw_V_tot_mc_median": np.nanmedian(r_btw_mc[:, j]),
@@ -431,11 +503,10 @@ def t1(run_dir):
                 "coverage_qij_0.95_se": se_qij,
                 "coverage_bootstrap_0.95": p_bootstrap,
                 "coverage_bootstrap_0.95_se": se_bootstrap,
-                # By construction (see docstring): n_qij_failed is
-                # n_draws - n_qij, so this is exactly n_qij -- never a
-                # min() against the bootstrap side, which is tracked in
-                # its own right through bootstrap_replicate_failure_fraction.
-                "n_coverage": n_draws - n_qij_failed,
+                # The common set's own size (see docstring): both
+                # methods' coverage above are computed on exactly this
+                # many draws, never a min() taken after the fact.
+                "n_coverage": n_coverage,
                 "width_ratio_0.95_median": np.nanmedian(width_ratio[:, j]),
                 "L_median": np.nanmedian(loaded["L"][:, j]),
                 "evaluations_median": np.nanmedian(loaded["evaluations"]),
@@ -466,6 +537,15 @@ def coverage_grid(run_dir):
     `level, coverage_qij, coverage_qij_se, n_qij, coverage_bootstrap,
     coverage_bootstrap_se, n_bootstrap`, the standard errors
     sqrt(p(1-p)/n).
+
+    Comparison-set ruling (figure spec, "Comparison set"; plan §36.11):
+    applied PER (dataset, estimator, output, level) -- `_comparison_mask`
+    on that coordinate's own `qij_lo_hi`/`bootstrap_lo_hi` at this level
+    -- before the coordinate's draws are ravelled into the pool, not
+    after pooling. Both methods are therefore masked to the identical
+    set at every coordinate they are pooled from, so `n_qij` and
+    `n_bootstrap` below come out equal: the pooled COMMON count, not two
+    separately sized pools that happen to share a name.
     """
     run_dir = Path(run_dir)
     config = yaml.safe_load((run_dir / "config.yaml").read_text())
@@ -483,8 +563,11 @@ def coverage_grid(run_dir):
         pooled_bootstrap = []
         for loaded in loaded_by_dir:
             qij_lo_hi, bootstrap_lo_hi = _compute_intervals(loaded, level)
-            pooled_qij.append(_covered(loaded["theta_true"], qij_lo_hi).ravel())
-            pooled_bootstrap.append(_covered(loaded["theta_true"], bootstrap_lo_hi).ravel())
+            common = _comparison_mask(qij_lo_hi, bootstrap_lo_hi)
+            cov_qij = np.where(common, _covered(loaded["theta_true"], qij_lo_hi), np.nan)
+            cov_bootstrap = np.where(common, _covered(loaded["theta_true"], bootstrap_lo_hi), np.nan)
+            pooled_qij.append(cov_qij.ravel())
+            pooled_bootstrap.append(cov_bootstrap.ravel())
         p_qij, se_qij, n_qij = _coverage_se(np.concatenate(pooled_qij))
         p_bootstrap, se_bootstrap, n_bootstrap = _coverage_se(np.concatenate(pooled_bootstrap))
         rows.append({

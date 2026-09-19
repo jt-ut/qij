@@ -1,15 +1,18 @@
 """
 The paper's figures (`QIJ_figure_spec_final.md`, 19 September 2026): Figure
 A (accuracy, replaces F2), Figure B (refined influence against the truth,
-replaces F3 and F9), Figure C (cost, replaces F7), Figure D (cost against
-sample size, was F10, design unchanged, now with an optional IMF sweep
-pair). Every figure here is a pure function of the products `qij.study`
-writes under `<run_dir>/<dataset>/<estimator>/` -- `truth.parquet`,
-`qij.parquet`, `boot.h5`, `qij_points.parquet`, `qij_prototypes.parquet` --
-and, for Figure C, the separate timing run's own products. Nothing else is
+replaces F3 and F9), Figure C (precision per evaluation, redesigned 19
+September, replaces F7), Figure D (cost against sample size, was F10,
+design unchanged, now with an optional IMF sweep pair). Every figure here
+is a pure function of the products `qij.study` writes under
+`<run_dir>/<dataset>/<estimator>/` -- `truth.parquet`, `qij.parquet`,
+`boot.h5`, `qij_points.parquet`, `qij_prototypes.parquet`. Nothing else is
 read: no estimator is re-run, no dataset is redrawn, no interval is read
 (none is stored -- every interval here is recomputed from
 `core.intervals.qij_interval` or `core.intervals.percentile_interval`).
+Figure C no longer needs a separate timing run: the 19 September redesign
+measures both methods against the truth in the same evaluation-cost unit,
+not against wall time (Figure D's subject).
 QIJ's second-order interval was built, checked against plan §34's decision
 rule on the rev-7 products and rejected there (it lowered coverage on
 every coordinate at every level, plan §36.1, §36.2 ruling 6); this module
@@ -102,6 +105,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.lines import Line2D
 from scipy.stats import pearsonr
+from scipy.stats.mstats import mjci
 
 from qij.core.intervals import percentile_interval, qij_interval
 
@@ -367,6 +371,25 @@ def _boot_lo_hi(loaded: dict, j: int, level: float, b: int = None) -> np.ndarray
     return lo_hi
 
 
+def _comparison_mask(lo_hi_qij: np.ndarray, lo_hi_boot: np.ndarray) -> np.ndarray:
+    """(n,) boolean: True for a draw where BOTH methods' intervals are
+    finite -- the comparison-set ruling (figure spec, "Comparison set";
+    plan §36.11, 19 September 2026). A draw whose full-data fit failed
+    has no QIJ interval and is dropped from the bootstrap's side too,
+    even though the bootstrap may still form and score one from its own
+    converged replicates on that same draw (an IMF box-rule draw, e.g.
+    s = 936, is exactly this case); a draw where QIJ's stage-1 collapsed,
+    or where the bootstrap has no converged replicate at all, is dropped
+    the same way. This is the conjunction of the SAME finiteness test
+    `_coverage_se` already applies to each method's own interval, not a
+    second convention -- every site here that compares the two methods
+    (`_coverage_pair`, `_width_ratio`, Figure C's curve/point/floor)
+    calls this once rather than re-deriving the test."""
+    qij_ok = np.isfinite(lo_hi_qij[:, 0]) & np.isfinite(lo_hi_qij[:, 1])
+    boot_ok = np.isfinite(lo_hi_boot[:, 0]) & np.isfinite(lo_hi_boot[:, 1])
+    return qij_ok & boot_ok
+
+
 def _coverage_se(theta_true: np.ndarray, lo_hi: np.ndarray) -> dict:
     """Empirical coverage and its Monte Carlo SE sqrt(p(1-p)/n), over the
     draws where both `theta_true` and the interval are finite (a failed
@@ -386,23 +409,35 @@ def _coverage_se(theta_true: np.ndarray, lo_hi: np.ndarray) -> dict:
 def _coverage_pair(loaded: dict, j: int, level: float) -> tuple:
     """(qij coverage dict, bootstrap coverage dict) at `level`, for output
     index `j` -- the one call both Figure A(b) and Figure D's coverage
-    panels make."""
+    panels make. Comparison-set ruling (figure spec, "Comparison set"):
+    a draw is scored for EITHER method only where BOTH methods' `level`
+    intervals are finite (`_comparison_mask`), so the two coverages are
+    never pooled from differently sized sets of draws -- the defect the
+    ruling fixes (the IMF's QIJ coverage stood on 969 draws, its
+    bootstrap coverage on up to 1000, because the bootstrap still forms
+    and scores an interval on a draw whose full-data fit failed)."""
     lo_hi_qij = _qij_lo_hi(loaded, j, level)
     lo_hi_boot = _boot_lo_hi(loaded, j, level)
-    theta_true = loaded["theta_true"][:, j]
+    common = _comparison_mask(lo_hi_qij, lo_hi_boot)
+    theta_true = np.where(common, loaded["theta_true"][:, j], np.nan)
     return _coverage_se(theta_true, lo_hi_qij), _coverage_se(theta_true, lo_hi_boot)
 
 
 def _width_ratio(loaded: dict, j: int, level: float) -> np.ndarray:
     """(n,) QIJ/bootstrap interval width at `level`, per draw, NaN where
-    either interval failed."""
+    either interval failed. `_comparison_mask` is applied explicitly here
+    too, even though the ratio's own NaN propagation (a NaN numerator or
+    denominator already NaNs the quotient) would exclude the same draws
+    on its own: one rule, called the same way at every comparison site,
+    rather than two conventions that merely happen to agree."""
     lo_hi_qij = _qij_lo_hi(loaded, j, level)
     lo_hi_boot = _boot_lo_hi(loaded, j, level)
+    common = _comparison_mask(lo_hi_qij, lo_hi_boot)
     w_qij = lo_hi_qij[:, 1] - lo_hi_qij[:, 0]
     w_boot = lo_hi_boot[:, 1] - lo_hi_boot[:, 0]
     with np.errstate(divide="ignore", invalid="ignore"):
         ratio = w_qij / w_boot
-    bad = ~np.isfinite(w_boot) | (w_boot == 0)
+    bad = ~common | ~np.isfinite(w_boot) | (w_boot == 0)
     return np.where(bad, np.nan, ratio)
 
 
@@ -508,11 +543,12 @@ def _row_panel(ax, rows: list, key_fn, xlabel: str, ref_line, band,
     else:
         ax.set_yticklabels([])
     # The panel's tag lives in its x-label (author's rule, 19 September):
-    # "(tag) <what the axis is> [units]". Nothing is drawn above the axes,
-    # which is where the old tag sat, detached from its panel by the full
-    # height of the title gap.
-    if show_xlabel:
-        ax.set_xlabel(xlabel, labelpad=2, fontweight="bold")
+    # "(tag) <what the axis is>". Nothing is drawn above the axes, which is
+    # where the old tag sat, detached from its panel by the full height of
+    # the title gap. Both of Figure A's panels carry one -- unlike Figure B,
+    # where a column shares one x quantity and only the bottom row is
+    # labelled.
+    ax.set_xlabel(xlabel, labelpad=2, fontweight="bold")
     # Few x-ticks, and never one hard against either end of the axis.
     # The three panels sit almost edge to edge (see `fig_a`'s wspace), so a
     # tick label at a panel's right edge would run into its neighbour's
@@ -551,12 +587,16 @@ def _a_rows(run_dir: str) -> tuple:
         rows_a.append(dict(label=c["label"], param=c["param"], group=c["group"],
                             qij=_mean_se(log_qij), boot=_mean_se(log_boot)))
 
-        # (b) coverage at 0.95
+        # (b) coverage at 0.95 -- `_coverage_pair` masks to the
+        # comparison-set ruling's common set (both methods' intervals
+        # finite) before scoring either, so the two coverages plotted in
+        # panel (a) below are always over the same draws.
         cov_qij, cov_boot = _coverage_pair(loaded, j, _LEVEL)
         rows_b.append(dict(label=c["label"], param=c["param"], group=c["group"],
                             qij=cov_qij, boot=cov_boot))
 
-        # (c) width ratio QIJ/bootstrap at 0.95, median with 5-95% whiskers
+        # (c) width ratio QIJ/bootstrap at 0.95, median with 5-95%
+        # whiskers -- `_width_ratio` applies the same common-set mask.
         ratio = _width_ratio(loaded, j, _LEVEL)
         ratio = ratio[np.isfinite(ratio)]
         if ratio.size:
@@ -820,87 +860,182 @@ def fig_b(run_dir: str) -> plt.Figure:
 
 
 # ---------------------------------------------------------------------------
-# Figure C -- cost (replaces F7)
+# Figure C -- precision per evaluation (replaces F7; redesigned by the
+# author, 19 September 2026). The reference is the TRUTH, not the
+# bootstrap's own converged self: `_c_w_true` is the one place that true
+# width, and its Monte-Carlo uncertainty, is computed; both methods'
+# curves are measured against it, in the same cost unit (a full-data
+# evaluation), so the two are finally on one axis.
 # ---------------------------------------------------------------------------
 
 _B_GRID_FRAC = [0.0125, 0.025, 0.05, 0.1, 0.2, 0.4, 0.8, 1.0]
 
 
-def _c_bootstrap_curve(theta_c: np.ndarray, b_grid_frac: list, level: float) -> tuple:
-    """theta_c: (S, B) one output's replicates. Returns (curve rows, w_ref
-    (S,) the full-B reference width per draw). `curve` rows now carry
-    p25/p75 as well as the mean (spec: "mean over draws with the
-    interquartile band" -- the module this replaces plotted the mean
-    alone). Loop over draws and the b grid only, never over N."""
-    S, B = theta_c.shape
-    w_ref = np.full(S, np.nan)
-    for s in range(S):
-        lo, hi = percentile_interval(theta_c[s][:, None], level)[0]
-        if np.isfinite(lo) and np.isfinite(hi):
-            w_ref[s] = hi - lo
+def _c_w_true(truth_df: pd.DataFrame, output: str, level: float) -> dict:
+    """The TRUE width for one estimand (spec, Figure C): the distance
+    between the (1-level)/2 and 1-(1-level)/2 quantiles of `theta_hat`
+    over `truth.parquet`'s own finite draws. Read directly from the truth
+    product, not through `_load_draws`'s inner join onto `qij.parquet`/
+    `boot.h5` -- a draw that failed QIJ or was dropped from the bootstrap
+    product is still a draw of the truth, and this quantity must not
+    shrink to whatever the other two products happened to keep. NaN draws
+    (the IMF's box rule) drop out of `np.percentile` on the finite mask
+    the same way every other statistic in this file excludes them.
 
+    The uncertainty on `w_true` is NOT a resample -- this package does not
+    resample its own reference (revision plan §35) -- but the Maritz-
+    Jarrett standard error of each quantile (`scipy.stats.mstats.mjci`),
+    an analytic, distribution-free estimator built from the SAME order
+    statistics: it weights every `theta_hat` by how much probability mass
+    a Beta(m, n-m+1) distribution -- the continuous limit of the binomial
+    distribution of an order statistic's rank -- places on that point
+    being the target quantile. Deterministic function of n and the target
+    probability, no randomness, no second sample. The two quantiles' SEs
+    are then combined in quadrature as though independent; their true
+    covariance is positive (`Cov(X_p, X_q) = p(1-q) / (n f(x_p) f(x_q))`
+    for p < q, both order statistics of the same draws), so treating it
+    as zero mildly OVER-states the width's SE -- conservative in exactly
+    the direction a "this difference is not resolvable" band should be.
+    `mjci` itself returns NaN when a run has too few draws for a stable
+    tail estimate (needs roughly 1/level draws per tail); that NaN
+    propagates to no band being drawn, not an error, matching how every
+    other under-powered statistic in this file behaves."""
+    alpha = 1.0 - level
+    p_lo, p_hi = alpha / 2.0, 1.0 - alpha / 2.0
+    x = truth_df[f"theta_hat_{output}"].to_numpy(dtype=float)
+    x = x[np.isfinite(x)]
+    if x.size < 2:
+        return dict(w=float("nan"), se=float("nan"))
+    lo, hi = np.percentile(x, [100.0 * p_lo, 100.0 * p_hi])
+    se_lo, se_hi = mjci(x, prob=[p_lo, p_hi])
+    se = float(np.sqrt(se_lo ** 2 + se_hi ** 2))
+    return dict(w=float(hi - lo), se=se)
+
+
+def _interval_score(lo, hi, y, level: float):
+    """The interval (Winkler) score of [lo, hi] against the truth y, a
+    PROPER scoring rule for an interval: the width, plus a penalty of
+    (2/alpha) times how far outside the interval the truth fell.
+
+        S = (hi - lo) + (2/a)(lo - y) if y < lo
+                      + (2/a)(y - hi) if y > hi
+
+    One number for what Figure A needs two panels to say. A too-narrow
+    interval pays the miss penalty; a too-wide one pays in width; and
+    because the rule is proper, neither shrinking nor inflating can game
+    it. Lower is better. Reported here divided by w_true, which makes it
+    dimensionless and comparable across estimands.
+    """
+    a = 1.0 - level
+    pen = 0.0
+    if y < lo:
+        pen = (2.0 / a) * (lo - y)
+    elif y > hi:
+        pen = (2.0 / a) * (y - hi)
+    return (hi - lo) + pen
+
+
+def _c_bootstrap_curve(theta_c: np.ndarray, w_true: float, theta_true: float,
+                        b_grid_frac: list, level: float, mask: np.ndarray = None) -> list:
+    """theta_c: (S, B) one output's replicates. For each prefix `b` of the
+    grid, the percentile width from the first b replicates of every draw,
+    relative error against the SINGLE scalar `w_true` (not each draw's
+    own converged width -- the 19 September redesign's point). Rows carry
+    the MEDIAN over draws and the interquartile band (spec: "the curve is
+    the median over draws ... the band the interquartile range"). Loop
+    over draws and the b grid only, never over N.
+
+    `mask`: (S,) boolean, the comparison-set ruling's fixed common set
+    (`_comparison_mask`, computed ONCE by `fig_c` from the FULL bootstrap
+    and the QIJ interval, both at `level`) -- held fixed across every
+    prefix `b` here, never recomputed from that prefix's own interval, so
+    a draw excluded from the comparison cannot drift back in at a smaller
+    b just because its own low-replicate interval happens to be finite
+    there (CAREFUL, task note: the curve would otherwise be over a moving
+    population). A draw INSIDE the common set can still drop out of one
+    b's own curve point below if that prefix itself has too few converged
+    replicates to form an interval (`percentile_interval` returns NaN) --
+    that is the bootstrap's own low-b behaviour, a second and unrelated
+    reason to skip a point, not a second comparison-set test."""
+    S, B = theta_c.shape
+    if mask is None:
+        mask = np.ones(S, dtype=bool)
     curve = []
     for frac in b_grid_frac:
         b = max(2, int(round(frac * B)))
         errs = []
         for s in range(S):
-            if not (np.isfinite(w_ref[s]) and w_ref[s] > 0):
+            if not mask[s]:
                 continue
             lo, hi = percentile_interval(theta_c[s, :b][:, None], level)[0]
             if np.isfinite(lo) and np.isfinite(hi):
-                errs.append(abs((hi - lo) - w_ref[s]) / w_ref[s])
+                errs.append(_interval_score(lo, hi, theta_true, level) / w_true)
         errs = np.array(errs)
-        curve.append(dict(b=b, mean=float(np.mean(errs)) if errs.size else float("nan"),
-                           p25=float(np.percentile(errs, 25)) if errs.size else float("nan"),
-                           p75=float(np.percentile(errs, 75)) if errs.size else float("nan")))
-    return curve, w_ref
+        if errs.size:
+            m = float(np.mean(errs))
+            se = float(np.std(errs, ddof=1) / np.sqrt(errs.size))
+        else:
+            m = se = float("nan")
+        curve.append(dict(b=b, median=m, p25=m - se, p75=m + se))
+    return curve
 
 
-def _c_qij_point(loaded: dict, j: int, w_ref: np.ndarray, level: float) -> dict:
+def _c_qij_point(loaded: dict, j: int, w_true: float, theta_true: float, level: float,
+                  mask: np.ndarray = None) -> dict:
+    """The QIJ marker: x the median over draws of `normalized_rows`, y the
+    median over draws of the QIJ interval's relative width error against
+    the same scalar `w_true` the bootstrap curve uses, interquartile
+    whiskers on y.
+
+    `mask`: the same fixed common set `_c_bootstrap_curve` uses
+    (`_comparison_mask`, comparison-set ruling), so the marker is a
+    median over the exact same draws as the curve and the ideal floor,
+    never QIJ's own larger valid set."""
     lo_hi = _qij_lo_hi(loaded, j, level)
     n = loaded["theta_hat"].shape[0]
+    if mask is None:
+        mask = np.ones(n, dtype=bool)
     xs, errs = [], []
     for i in range(n):
-        ref = w_ref[i]
-        if not (np.isfinite(ref) and ref > 0):
+        if not mask[i]:
             continue
         lo, hi = lo_hi[i]
         nrows = loaded["normalized_rows"][i]
         if not (np.isfinite(lo) and np.isfinite(hi) and np.isfinite(nrows)):
             continue
         xs.append(float(nrows))
-        errs.append(abs((hi - lo) - ref) / ref)
+        errs.append(_interval_score(lo, hi, theta_true, level) / w_true)
     if not xs:
         nan = float("nan")
         return dict(x=nan, y=nan, p25=nan, p75=nan)
     xs_a, errs_a = np.array(xs), np.array(errs)
-    return dict(x=float(np.median(xs_a)), y=float(np.median(errs_a)),
-                p25=float(np.percentile(errs_a, 25)), p75=float(np.percentile(errs_a, 75)))
+    m = float(np.mean(errs_a))
+    se = float(np.std(errs_a, ddof=1) / np.sqrt(errs_a.size)) if errs_a.size > 1 else float("nan")
+    return dict(x=float(np.median(xs_a)), y=m, p25=m - se, p75=m + se)
 
 
-def _seconds(v: float) -> str:
-    """A wall time a reader can take in: "0.35 s", "64 s", "210 s" -- never
-    "2.1e+02s", which is what %.2g gives for anything past 100."""
-    if not np.isfinite(v):
-        return "n/a"
-    if v >= 100:
-        return f"{v:.0f} s"
-    if v >= 10:
-        return f"{v:.1f} s"
-    return f"{v:.2f} s"
-
-
-def _plot_c_panel(ax, curve: list, pt: dict, wall_times: dict, title: str, panel_lbl: str) -> None:
+def _plot_c_panel(ax, curve: list, pt: dict, ideal: float, title: str, panel_lbl: str) -> None:
     lw = plt.rcParams["lines.linewidth"]
     ms = plt.rcParams["lines.markersize"]
     b = np.array([r["b"] for r in curve], dtype=float)
-    mean = np.array([r["mean"] for r in curve])
+    med = np.array([r["median"] for r in curve])
     p25 = np.array([r["p25"] for r in curve])
     p75 = np.array([r["p75"] for r in curve])
-    finite = np.isfinite(mean)
+    finite = np.isfinite(med)
+
+    # Reference: a zero line (perfect agreement with the truth) and, when
+    # `w_true`'s own Monte-Carlo SE is finite, a light band up to its
+    # relative size -- an apparent width error smaller than that could be
+    # noise in the reference itself rather than either method's error.
+    ax.axhline(0.0, color=METHOD["truth"]["color"], ls=":", lw=1.0, zorder=1)
+    if np.isfinite(ideal):
+        # The achievable floor, not zero: a correctly calibrated interval
+        # still misses its 5% and pays the score for it.
+        ax.axhline(ideal, color=METHOD["truth"]["color"], ls=":", lw=1.0, zorder=1)
+
     ax.fill_between(b[finite], p25[finite], p75[finite], color=METHOD["boot"]["color"],
                      alpha=0.18, linewidth=0, zorder=1)
-    ax.plot(b[finite], mean[finite], color=METHOD["boot"]["color"], ls=METHOD["boot"]["ls"],
+    ax.plot(b[finite], med[finite], color=METHOD["boot"]["color"], ls=METHOD["boot"]["ls"],
             lw=lw * 0.7, zorder=2)
 
     if np.isfinite(pt["x"]) and np.isfinite(pt["y"]):
@@ -910,16 +1045,22 @@ def _plot_c_panel(ax, curve: list, pt: dict, wall_times: dict, title: str, panel
         ax.plot(pt["x"], pt["y"], marker=METHOD["qij"]["marker"], color=color, ms=ms * 1.1,
                 ls="none", zorder=4)
 
-    # Two lines, not one: at panel widths of ~1.2in, "QIJ x s / boot y s"
-    # on one line is wider than the panel and spills into the y-tick
-    # labels on the left; stacked, each line is about half as wide.
-    fs = _STATE["annotation_fontsize"]
-    ax.text(0.96, 0.97, f"QIJ {_seconds(wall_times['qij'])}\nBoot {_seconds(wall_times['boot'])}",
-            transform=ax.transAxes, ha="right", va="top", fontsize=fs, color="#555555",
-            linespacing=1.15)
+    # The range comes from what is drawn -- the boot band's edges and the
+    # QIJ whiskers (or its bare marker, when it has no whiskers) -- widened
+    # only far enough to keep the zero line and the materiality band in
+    # view (`_data_span`), never a hardcoded `bottom=0`.
+    lo_parts, hi_parts = [p25[finite]], [p75[finite]]
+    if np.isfinite(pt["y"]):
+        pt_lo = pt["p25"] if np.isfinite(pt["p25"]) else pt["y"]
+        pt_hi = pt["p75"] if np.isfinite(pt["p75"]) else pt["y"]
+        lo_parts.append(np.array([pt_lo]))
+        hi_parts.append(np.array([pt_hi]))
+    keep = [ideal] if np.isfinite(ideal) else []
+    span = _data_span(np.concatenate(lo_parts), np.concatenate(hi_parts), include=keep)
+    if span is not None:
+        ax.set_ylim(*span)
 
     ax.set_xscale("log")
-    ax.set_ylim(bottom=0)
     ax.set_title(f"{panel_lbl} {title}")
     # No per-panel x/y label -- every one of the six panels shares the
     # same two axis quantities (unlike Figure B, where the x quantity
@@ -928,64 +1069,121 @@ def _plot_c_panel(ax, curve: list, pt: dict, wall_times: dict, title: str, panel
     # a grid with no room to spare.
 
 
-def fig_c(run_dir: str, timing_dir: str) -> plt.Figure:
-    """Figure C -- cost (spec section "Figure C", replaces F7). 2x3 panels
-    at the spec's fixed grid positions. Each panel: the bootstrap's own
-    relative width error of its 0.95 interval after the first b
-    replicates, against its full-B reference width, mean over draws with
-    the interquartile band (`boot.h5`'s replicates, prefix quantiles); the
-    QIJ marker at the coordinate's median normalized rows with
-    interquartile whiskers, its width error against the SAME converged-
-    bootstrap reference (`run_dir`'s `qij.parquet`); in the corner,
-    "QIJ x s / bootstrap y s", the two wall times FROM THE SEPARATE
-    TIMING RUN (one worker, one thread) -- never
-    `run_dir`'s own wall time, which was not captured under that
-    discipline (cost layer 3, `study.py`'s module docstring). The Fundamental
-    Plane's four outputs share one run and hence one wall-time pair; both
-    FP panels ((1,3) FP a and (2,1) FP scatter) print the identical pair,
-    which is correct, not a bug -- the tex caption should say so, since
-    this figure cannot.
+def fig_c(run_dir: str) -> plt.Figure:
+    """Figure C -- precision per evaluation (spec section "Figure C",
+    redesigned 19 September 2026, replaces F7). 2x3 panels at the spec's
+    fixed grid positions. Each panel measures BOTH methods against the
+    TRUTH, not the bootstrap against its own converged self (the design
+    this replaces): a single true width `w_true` per estimand (`_c_w_true`,
+    the 2.5/97.5 quantile spread of `theta_hat` over `truth.parquet`'s own
+    finite draws), then
+
+      Boot: the percentile width from the first b of `boot.h5`'s
+      replicates, relative error against `w_true`, median over draws with
+      the interquartile band -- it plateaus at the bootstrap's own limit
+      (near 0 on the clean estimands, near 0.5 on IMF p) and does not
+      reach zero at b = B; nothing here draws it as though it should.
+
+      QIJ: one marker at the coordinate's median normalized rows over
+      draws, y its median relative width error against the SAME `w_true`,
+      interquartile whiskers.
+
+      Reference: a zero line plus a light band for `w_true`'s own Monte-
+      Carlo uncertainty (`_c_w_true`'s Maritz-Jarrett SE, relative to
+      `w_true`), so a reader can see what difference is resolvable.
+
+    x is cost in full-data evaluations (the bootstrap's b replicates and
+    QIJ's normalized rows, the same unit), log scale. No wall times are
+    printed here -- that is Figure D's subject and Table T1's within-draw
+    ratio -- so this figure takes no `timing_dir`.
+
+    Comparison-set ruling (figure spec, "Comparison set"): the bootstrap
+    curve, the QIJ marker and the ideal floor are all computed over the
+    same set of draws, `common` below -- `_comparison_mask` applied ONCE
+    per coordinate, from the FULL bootstrap (every replicate) and the
+    QIJ interval, both at `_LEVEL`, never recomputed from a prefix `b`'s
+    own interval (a draw must not enter the curve at one b and leave it
+    at another, or the curve is over a moving population). `w_true`
+    (`_c_w_true`) is deliberately NOT restricted to `common`: it is read
+    from `truth.parquet`'s own finite draws by design (that function's
+    own docstring), the reference both methods are measured against, and
+    must not shrink to whatever the comparison set happens to keep.
     """
     _use_style()
     figsize = FIGSIZE_C_LNCS
     fig, axes = plt.subplots(2, 3, figsize=figsize, constrained_layout=False)
 
-    timing_cache = {}
     for c in _COORDS:
         path = _product_dir(run_dir, c["dataset"], c["estimator"])
         truth = pd.read_parquet(os.path.join(path, "truth.parquet"))
         outputs = _outputs(truth)
         j = outputs.index(c["output"])
-        loaded = _load_draws(path, outputs)
-        curve, w_ref = _c_bootstrap_curve(loaded["theta_boot"][:, :, j], _B_GRID_FRAC, _LEVEL)
-        pt = _c_qij_point(loaded, j, w_ref, _LEVEL)
-
-        key = (c["dataset"], c["estimator"])
-        if key not in timing_cache:
-            tpath = _product_dir(timing_dir, c["dataset"], c["estimator"])
-            ttruth = pd.read_parquet(os.path.join(tpath, "truth.parquet"))
-            touts = _outputs(ttruth)
-            tloaded = _load_draws(tpath, touts)
-            timing_cache[key] = dict(
-                qij=float(np.nanmedian(tloaded["wall_time_qij"])),
-                boot=float(np.nanmedian(tloaded["wall_time_boot"])),
-            )
-
         ax = axes[c["row"], c["col"]]
         # Tags run DOWN each column, matching the grid's dataset pairing.
         panel_lbl = f"{chr(ord('a') + c['col'] * 2 + c['row'])}."
-        _plot_c_panel(ax, curve, pt, timing_cache[key], c["label"], panel_lbl)
+
+        w_true = _c_w_true(truth, c["output"], _LEVEL)
+        if not (np.isfinite(w_true["w"]) and w_true["w"] > 0):
+            # No usable true width for this estimand's draws -- an empty,
+            # titled panel rather than a crash or a silent divide by zero.
+            ax.set_title(f"{panel_lbl} {c['label']}")
+            continue
+
+        loaded = _load_draws(path, outputs)
+        theta_true = float(np.nanmedian(loaded["theta_true"][:, j]))
+
+        # The comparison set, fixed ONCE from each method's full result: a
+        # draw on which either method has no interval is dropped for both
+        # (plan §36.11). Taken from the full-B bootstrap, never from a
+        # prefix's own interval, so the curve is over one population at every
+        # point along it rather than a moving one.
+        common = _comparison_mask(_qij_lo_hi(loaded, j, _LEVEL),
+                                  _boot_lo_hi(loaded, j, _LEVEL))
+
+        # The reference is the TRUE 95% interval itself -- [q2.5, q97.5] of
+        # theta_hat over the draws -- scored against theta_true. Its width is
+        # w_true by definition and theta_true lies inside it, so it never pays
+        # a penalty and its normalised score is exactly 1.000 on every
+        # coordinate. The line is therefore the y-axis's own unit: "paid
+        # exactly the true width, never missed".
+        #
+        # It replaces a pivotal fixed-width interval that was drawn here as an
+        # "ideal" and was not one. That interval is CALIBRATED -- it covers 95%
+        # by construction -- but calibration does not minimise this score: the
+        # minimum belongs to the interval that is narrow on the draws where the
+        # estimator is precise and wide where it is not, and both real methods
+        # adapt that way. So both beat it, on IMF p by a wide margin, and a
+        # reference that the things it bounds can beat teaches the reader
+        # nothing except mistrust.
+        #
+        # 1.000 is not a hard lower bound either -- a deliberately narrow
+        # interval can score under it if its misses stay small -- and the
+        # caption must not claim otherwise. What it is, is the price of being
+        # exactly right, which is the thing worth measuring against.
+        ideal = _interval_score(*np.percentile(
+            loaded["theta_hat"][:, j][np.isfinite(loaded["theta_hat"][:, j])],
+            [2.5, 97.5]), theta_true, _LEVEL) / w_true["w"]
+        curve = _c_bootstrap_curve(loaded["theta_boot"][:, :, j], w_true["w"],
+                                    theta_true, _B_GRID_FRAC, _LEVEL, mask=common)
+        pt = _c_qij_point(loaded, j, w_true["w"], theta_true, _LEVEL, mask=common)
+        _plot_c_panel(ax, curve, pt, float(ideal), c["label"], panel_lbl)
 
     fig.subplots_adjust(left=0.125, right=0.99, top=0.945, bottom=0.115,
                          hspace=0.42, wspace=0.34)
-    fig.supxlabel("Normalized rows", fontsize=plt.rcParams["axes.labelsize"],
+    fig.supxlabel("Full-data evaluations", fontsize=plt.rcParams["axes.labelsize"],
                   fontweight="bold")
-    fig.supylabel("Rel. width error", fontsize=plt.rcParams["axes.labelsize"], fontweight="bold")
+    fig.supylabel("Interval score / $w_{true}$", fontsize=plt.rcParams["axes.labelsize"], fontweight="bold")
 
+    # (3) The legend is an inset on panel (a), MVT nu, upper right -- the
+    # same placement the module this replaces used, and it still holds:
+    # at large b/normalized-rows the curve and the QIJ marker have both
+    # settled near their low plateau on this coordinate, so the upper
+    # right corner (large x, large y) is the one region no series ever
+    # reaches, on every build. As in Figure A, one legend for the figure.
     h1 = Line2D([], [], color=METHOD["boot"]["color"], ls=METHOD["boot"]["ls"],
-                lw=plt.rcParams["lines.linewidth"] * 0.7, label="Boot (first $b$)")
+                lw=plt.rcParams["lines.linewidth"] * 0.7, label="Boot (mean $\\pm$ SE)")
     h2 = Line2D([], [], marker=METHOD["qij"]["marker"], color=METHOD["qij"]["color"], ls="none",
-                ms=plt.rcParams["lines.markersize"] * 1.1, label="QIJ (median, IQR)")
+                ms=plt.rcParams["lines.markersize"] * 1.1, label="QIJ (mean $\\pm$ SE)")
     axes[0, 0].legend(handles=[h1, h2], loc="upper right", ncol=1,
                       frameon=True, framealpha=0.9, borderpad=0.3,
                       handletextpad=0.4, labelspacing=0.3,
