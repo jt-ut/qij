@@ -1,18 +1,20 @@
 """The study loop (plan Sec 3, Sec 6, Sec 7): `run_study(config, out_dir,
 workers)` writes the truth, boot and qij products -- and, wherever an
-estimator carries an analytic influence, qij_partition and qij_points --
-for every dataset, sample size, estimator and draw named by a config.
+estimator carries an analytic influence, qij_partition, qij_points and
+qij_prototypes -- for every dataset, sample size, estimator and draw
+named by a config.
 
 One loop, one sentence (plan Sec 6): for each dataset and draw s,
 `X = dataset(N, master + s)`; for each of that dataset's estimators,
 `theta_hat = T(X, ones)`, `Bootstrap(B, seed).fit(X, T)`,
 `QIJ(eps, eta, seed).fit(X, T, influence=psi)`; append one row to
-`truth`, B rows to `boot`, one row to `qij` (and the partition and points
-rows wherever `T.influence` exists). `s` is the join key everywhere: draw
-s of a dataset is the same X_s for every estimator and both methods.
-Adding a method later means adding one more product write inside
-`_run_draw`'s per-estimator body -- `boot` and `qij` never share a code
-path beyond that shared `X`.
+`truth`, B rows to `boot`, one row to `qij` (and the partition, points
+and prototypes rows wherever `T.influence` exists). `s` is the join key
+everywhere: draw s of a dataset is the same X_s for every estimator and
+both methods -- `qij_points` and `qij_prototypes` each carry `s` too, so
+either joins back to that draw's `qij.parquet` row. Adding a method later
+means adding one more product write inside `_run_draw`'s per-estimator
+body -- `boot` and `qij` never share a code path beyond that shared `X`.
 
 Config schema (interface sheet Amendment 6; `configs/*.yaml` is the
 datasets agent's file, on disk as of that amendment):
@@ -28,9 +30,10 @@ datasets agent's file, on disk as of that amendment):
 
 There is no `partition` or `points` config key (Amendment 6: one fewer
 configuration layer, plan Sec 12): whether an estimator's draws get a
-`qij_partition` row and which draw is `qij_points`'s designated one are
-both decided from `T.influence` alone, per the module constants
-`PARTITION_S` and `POINTS_DRAW` below, not from the config.
+`qij_partition` row and which draw is `qij_points`'s (and
+`qij_prototypes`'s) designated one are both decided from `T.influence`
+alone, per the module constants `PARTITION_S` and `POINTS_DRAW` below,
+not from the config.
 
 `vq_transform` is never a config key (plan Sec 5): the MVT dataset alone
 gets `datasets.mvt_vq_transform` passed to `QIJ`, every other dataset
@@ -38,9 +41,9 @@ gets none, decided here from the dataset name, not from the config.
 
 Product paths (interface sheet Sec 5, amended): `<out_dir>/<dataset>/
 <T.name>/{truth.parquet, boot.h5, qij.parquet, qij_partition.parquet,
-qij_points.parquet}` when a dataset's config carries one N; when it
-carries more than one (only `cost_vs_n.yaml`), an `N<size>` directory is
-inserted before the product files.
+qij_points.parquet, qij_prototypes.parquet}` when a dataset's config
+carries one N; when it carries more than one (only `cost_vs_n.yaml`), an
+`N<size>` directory is inserted before the product files.
 
 Resume: a draw s is considered done for a dataset once its `s` appears in
 every one of that dataset's estimators' `truth.parquet` -- written last,
@@ -111,10 +114,10 @@ def _run_draw(dataset_fn, N, s, master_seed, estimator_items, vq_transform,
     makes both `boot.h5`'s fixed-index slots and `truth.parquet`'s
     resume marker safe under joblib's out-of-order completion.
 
-    The partition and points rows are written wherever `T.influence`
-    exists, not by a config flag (Amendment 6): `qij_res.psi_oracle` is
-    None exactly when no `influence` was passed to `QIJ.fit`, i.e. `T`
-    has no `.influence`.
+    The partition, points and prototypes rows are written wherever
+    `T.influence` exists, not by a config flag (Amendment 6):
+    `qij_res.psi_oracle` is None exactly when no `influence` was passed
+    to `QIJ.fit`, i.e. `T` has no `.influence`.
     """
     seed = master_seed + s
     X = dataset_fn(N, seed)
@@ -151,9 +154,12 @@ def _run_draw(dataset_fn, N, s, master_seed, estimator_items, vq_transform,
                 PARTITION_M_GRID, seed)
 
         points_df = None
+        prototypes_df = None
         if qij_res.psi_oracle is not None and s == POINTS_DRAW:
             points_df = _points_frame(
-                T.outputs, qij_res.psi0, qij_res.psi_oracle, qij_res.sigma)
+                s, T.outputs, qij_res.psi0, qij_res.psi_oracle, qij_res.sigma)
+            prototypes_df = _prototypes_frame(
+                s, T.outputs, qij_res.xvq, qij_res.W_X, qij_res.I_proto)
 
         per_est[name] = dict(
             truth_row=truth_row,
@@ -163,6 +169,7 @@ def _run_draw(dataset_fn, N, s, master_seed, estimator_items, vq_transform,
             boot_wall_time=boot_res.wall_time,
             partition_rows=partition_rows,
             points_df=points_df,
+            prototypes_df=prototypes_df,
         )
     return s, seed, per_est
 
@@ -255,16 +262,38 @@ def _partition_rows(s, outputs, psi_oracle, psi0_hat, Z, M_grid, seed):
     return rows
 
 
-def _points_frame(outputs, psi0_hat, psi_oracle, sigma) -> pd.DataFrame:
-    """`qij_points.parquet` rows for the designated draw: `i` plus,
-    per output, `psi0`, `psi` and `sigma` -- built as one dict of
-    column arrays, never a Python loop over the N points."""
+def _points_frame(s, outputs, psi0_hat, psi_oracle, sigma) -> pd.DataFrame:
+    """`qij_points.parquet` rows for the designated draw: `s` (the draw
+    index, so a join back to that draw's `qij.parquet` row is possible),
+    `i`, plus per output `psi0`, `psi` and `sigma` -- built as one dict
+    of column arrays, never a Python loop over the N points."""
     N = psi0_hat.shape[0]
-    data = {'i': np.arange(N)}
+    data = {'s': np.full(N, s), 'i': np.arange(N)}
     for j, o in enumerate(outputs):
         data[f'psi0_{o}'] = psi0_hat[:, j]
         data[f'psi_{o}'] = psi_oracle[:, j]
         data[f'sigma_{o}'] = sigma[:, j]
+    return pd.DataFrame(data)
+
+
+def _prototypes_frame(s, outputs, xvq, W_X, I_proto) -> pd.DataFrame:
+    """`qij_prototypes.parquet` rows for the designated draw (plan Sec 3
+    "What to add" 1): `s`, `j` (the prototype index), `p` (its
+    receptive-field mass, `xvq.p`, summing to 1 over the file), `w_0,
+    w_1, ...` (its position in T's OWN native coordinates, `res.W_X` --
+    not the whitened quantizer coordinates), and per output `I_<output>`
+    (the measured, mass-centred prototype influence, `res.I_proto`, as
+    `core.xvq.prototype_influences` returns it -- NaN where a
+    prototype's evaluation failed, left as NaN, not dropped or filled,
+    so the row stays aligned with `j`). Built as one dict of column
+    arrays, never a Python loop over the M_used prototypes."""
+    M_used = W_X.shape[0]
+    W_X2 = np.asarray(W_X, dtype=float).reshape(M_used, -1)
+    data = {'s': np.full(M_used, s), 'j': np.arange(M_used), 'p': xvq.p}
+    for d in range(W_X2.shape[1]):
+        data[f'w_{d}'] = W_X2[:, d]
+    for j, o in enumerate(outputs):
+        data[f'I_{o}'] = I_proto[:, j]
     return pd.DataFrame(data)
 
 
@@ -297,7 +326,11 @@ def _append_parquet(path: str, rows: list, key) -> None:
     df.to_parquet(path, index=False)
 
 
-def _write_points(path: str, df: pd.DataFrame) -> None:
+def _write_designated_frame(path: str, df: pd.DataFrame) -> None:
+    """Write a designated-draw product (`qij_points.parquet`,
+    `qij_prototypes.parquet`) outright: unlike `_append_parquet`, there
+    is exactly one draw's rows to write, so no dedup-on-flush is
+    needed."""
     df.to_parquet(path, index=False)
 
 
@@ -395,7 +428,9 @@ def _run_dataset(dataset_name, dataset_fn, estimators, N, S, B, master_seed,
             if res['partition_rows']:
                 buffers[name]['partition'].extend(res['partition_rows'])
             if res['points_df'] is not None:
-                _write_points(os.path.join(d, 'qij_points.parquet'), res['points_df'])
+                _write_designated_frame(os.path.join(d, 'qij_points.parquet'), res['points_df'])
+            if res['prototypes_df'] is not None:
+                _write_designated_frame(os.path.join(d, 'qij_prototypes.parquet'), res['prototypes_df'])
         n_done += 1
         if n_done % _FLUSH_EVERY == 0:
             _flush(buffers, est_dirs)

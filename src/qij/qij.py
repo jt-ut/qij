@@ -84,6 +84,16 @@ class QIJ:
 
         t0 = time.perf_counter()
         xvq, theta_Q, I_proto = run_xvq(Z, inverse, counter, eta, M_requested, self.seed)
+        # W_X: the prototypes' positions in T's own native coordinates --
+        # exactly what `core.xvq.run_xvq` already mapped `xvq.centers`
+        # through `inverse` to get, to evaluate the prototype influences
+        # (`core/xvq.py`'s `prototype_influences`). `run_xvq` does not
+        # return that intermediate, so it is recovered here by the same
+        # pure, deterministic `inverse` call on the same `xvq.centers` --
+        # not a second way to derive a quantity, since `inverse` performs
+        # no estimation. Needed on the result for `qij_prototypes.parquet`
+        # (plan's F9 measured-points product).
+        W_X = np.asarray(inverse(xvq.centers), dtype=float)
         model = fit_influence_model(Z, xvq, I_proto, theta_Q)
         psi0_all = _psi0(model, Z)
         sigma_all = _uncertainty(model, Z)
@@ -143,6 +153,7 @@ class QIJ:
         return QIJResult(
             theta_hat=theta_hat, outputs=outputs, name=T.name, N=N,
             coordinates=coordinates, xvq=xvq, model=model, theta_Q=np.asarray(theta_Q, dtype=float),
+            W_X=W_X, I_proto=np.asarray(I_proto, dtype=float),
             psi0=psi0_all, sigma=sigma_all,
             evaluations=ev3, rows=rows3, n_failed=counter.failed,
             evals_by_stage=evals_by_stage, rows_by_stage=rows_by_stage,

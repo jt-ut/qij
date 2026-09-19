@@ -24,16 +24,21 @@ class QIJResult:
 
     `.interval`, `.variance`, `.summary()` are the pinned user surface
     (interface sheet §1). The remaining fields are what `study.py` needs
-    to write the qij, qij_partition and qij_points products (plan §3)
-    without a second computation path of its own: `coordinates` (the
-    per-output diagnostics from `core.refine`, including each output's
-    influence `field` and its final 𝓘-VQ bin `labels`, per point --
-    `labels` is also what `qij.check`, amendment 6, evaluates the scale
-    identity on), `xvq` and `model` (the fitted quantizer and influence
-    model), `theta_Q` (the stage-1 value, for the θ_Q/θ̂ discrepancy),
-    `psi0`/`sigma` (per point, for `qij_points`), and
-    `oracle_variance`/`psi_oracle` (only when `influence` was given to
-    `.fit`, plan §1).
+    to write the qij, qij_partition, qij_points and qij_prototypes
+    products (plan §3) without a second computation path of its own:
+    `coordinates` (the per-output diagnostics from `core.refine`,
+    including each output's influence `field` and its final 𝓘-VQ bin
+    `labels`, per point -- `labels` is also what `qij.check`,
+    amendment 6, evaluates the scale identity on), `xvq` and `model`
+    (the fitted quantizer and influence model; `xvq.p` is also the
+    receptive-field masses `qij_prototypes` writes as `p`), `theta_Q`
+    (the stage-1 value, for the θ_Q/θ̂ discrepancy), `W_X` (the
+    prototypes' positions in T's own native coordinates, `core.xvq.
+    run_xvq`'s `inverse(xvq.centers)`) and `I_proto` (the measured,
+    mass-centred prototype influences `core.xvq.prototype_influences`
+    returns) together for `qij_prototypes`, `psi0`/`sigma` (per point,
+    for `qij_points`), and `oracle_variance`/`psi_oracle` (only when
+    `influence` was given to `.fit`, plan §1).
     """
     theta_hat: np.ndarray            # (q,)
     outputs: Tuple[str, ...]
@@ -43,6 +48,8 @@ class QIJResult:
     xvq: XVQ
     model: InfluenceModel
     theta_Q: np.ndarray               # (q,) the stage-1 quantized-data value
+    W_X: np.ndarray                   # (M_used,) or (M_used, d) prototype positions in T's native coordinates
+    I_proto: np.ndarray               # (M_used, q) mass-centred measured prototype influence
     psi0: np.ndarray                  # (N, q)
     sigma: np.ndarray                 # (N, q)
     evaluations: int
