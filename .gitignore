@@ -1,4 +1,14 @@
+# LaTeX build artifacts. The sources, the class and style files, the
+# bibliography, the .bbl (LNCS wants it at submission) and the figure PDFs
+# the document includes are all tracked; what a run of pdflatex regenerates
+# is not.
+*.aux
+*.log
+*.blg
+*.out
+*.toc
+*.synctex.gz
+
 __pycache__/
 *.pyc
-*.egg-info/
 .DS_Store

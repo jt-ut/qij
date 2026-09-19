@@ -1,0 +1,271 @@
+% ======================================================================
+% QIJ — WSOM+2026 submission
+% Notation: psi = influence function; RF = receptive field (n_j counts,
+% p_j = n_j/N); W = prototypes; V_tot = V_btw + V_win (identity, eq. 4).
+% Figures: f3.pdf f2.pdf f7.pdf f9.pdf alongside this file.
+% REVISION COPY (paper/revision/): see REVISION_PLAN.md. Original kept as qij_wsom_original.tex.
+% ======================================================================
+\documentclass[runningheads]{llncs}
+
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}
+\usepackage{mathtools}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{xcolor}
+
+% --- revision markup ---
+% \rev{...} marks text written or rewritten for the revision: bold blue.
+% Set \revfalse before the final build to print revised text plainly.
+\newif\ifrev \revtrue
+\newcommand{\rev}[1]{\ifrev{\color{blue}\bfseries #1}\else#1\fi}
+
+% --- notation ---
+\newcommand{\ifl}{\psi}
+\newcommand{\Vcell}{V_{\mathrm{btw}}}
+\newcommand{\Vwithin}{V_{\mathrm{win}}}
+\newcommand{\Vtotal}{V_{\mathrm{tot}}}
+\newcommand{\Fhat}{\hat F}
+\newcommand{\Vwinhat}{\hat V_{\mathrm{win}}}
+\newcommand{\Vtothat}{\hat V_{\mathrm{tot}}}
+\newcommand{\XVQ}{\ensuremath{\mathcal{X}}-VQ}
+\newcommand{\IVQ}{\ensuremath{\mathcal{I}}-VQ}
+\newcommand{\MX}{M_{\mathcal{X}}}
+\newcommand{\MI}{M_{\mathcal{I}}}
+\newcommand{\psinull}{\hat{\psi}_0}
+\newcommand{\psih}{\hat{\psi}}
+\newcommand{\Bhat}{\hat{B}}
+\newcommand{\hqij}[1]{h^{\mathrm{QIJ}}_{#1}}
+\newcommand{\hboot}[1]{h^{\mathrm{boot}}_{#1}}
+
+\begin{document}
+
+\title{Vector Quantization for Uncertainty Quantification: The Quantized Infinitesimal Jackknife}
+
+\titlerunning{Vector Quantization for Uncertainty Quantification}
+% ORCID iDs can be added via \orcidID{...} after each name if desired
+\author{Josh Taylor\inst{1}\thanks{Corresponding author.} \and
+Stella S. R. Offner\inst{1}}
+\authorrunning{J. Taylor and S. S. R. Offner}
+\institute{The University of Texas at Austin, Department of Astronomy and Oden Institute for Computational Engineering and Sciences, Austin, Texas, USA
+\email{joshtaylor@utexas.edu}}
+
+\maketitle
+
+\begin{abstract}
+Nonparametric confidence intervals (CIs) for a parameter estimate $T$ are commonly obtained by the bootstrap: recompute the estimate on $B$ resampled datasets and infer estimate uncertainty from the replicates. The bootstrap is the gold standard, but it costs $B$ evaluations of the estimator, prohibitive when a single fit is expensive, e.g.\ when $T$ must be found by numerical optimization rather than in closed form. 
+
+We show that a fitted vector quantizer (VQ) offers a much cheaper route to similar intervals. The Quantized Infinitesimal Jackknife (QIJ) uses a
+quantizer's $M$ receptive fields as perturbation scaffolding for the
+uncertainty calculation, measuring how $\hat{T}$ responds when each field's
+share of the data is perturbed (propagating these multinomial fluctuations through the measured responses), yielding the variance and skewness of the estimator's sampling distribution. This is like the infinitesimal jackknife (IJ), except the perturbation occurs across $M$ Voronoi regions, instead of $N$ sample observations. It recovers IJ as $M \to N$. No resampling occurs anywhere, and the number of estimator evaluations scales with $M$ rather than $B$. The underlying variance analysis applies to any VQ resolution. On two synthetic distributions (Pareto; multivariate $t$ in ten dimensions)
+and an astronomical dataset (the galaxy Fundamental Plane), QIJ matches the
+bootstrap's coverage and interval widths across eight estimands at a small
+fraction of its computation.
+
+%We show that a fitted vector quantizer offers a much cheaper route to the same intervals. The Quantized Infinitesimal Jackknife (QIJ) uses the quantizer's $M$ receptive fields (with counts $n_j$) as the variables of the uncertainty calculation: the estimator is re-expressed as a function of the counts, and QIJ measures how $T$ responds when each $n_j$ is perturbed, which is the natural impact of resampling on a VQ. This requires only $\mathcal{O}(M)$ evaluations of $T(X)$ in total, vs.\ $B \gg M{+}1$ in the standard bootstrap. We infer the variance and skewness of the estimate by propagating the counts' exactly known (multinomial) sampling fluctuations through the measured responses; both feed our VQ-enabled CIs, and no resampling occurs anywhere. On two synthetic distributions (Pareto; multivariate $t$ in ten dimensions) and an astronomical dataset (the galaxy Fundamental Plane), QIJ matches the bootstrap's coverage and interval widths at a small fraction of its computation.
+\keywords{vector quantization \and uncertainty quantification \and confidence intervals \and influence functions \and bootstrap}
+\end{abstract}
+
+
+% ======================================================================
+\section{Introduction}\label{sec:intro}
+% ======================================================================
+
+Vector quantization (VQ) compresses a dataset $X = \{x_i \in \mathbb{R}^d\}_{i=1}^N$ into $M \ll N$ prototypes $W = \{w_j\}_{j=1}^M$ to facilitate signal encoding, clustering, density representation \cite{graf2000}, and, through self-organizing maps and their descendants, topology-preserving visualizations. In this work, we assign VQ the task of constructing confidence intervals for an arbitrary parameter estimate  computed from $X$.
+
+The bootstrap \cite{efron1979} is the gold standard for nonparametric interval estimation: recompute the estimator $T$ on $B$ resampled datasets, with $B$ in the hundreds to thousands, and infer CIs from the replicated sampling distribution of $T$. When a single evaluation of $T$ is expensive, e.g., the result of an optimizer-based fit, a profile likelihood, or an ensemble fit, those $B$ evaluations dominate the analysis. Since a VQ represents a large dataset compactly, one might expect its prototypes to stand in for the $N$ sample points during resampling; this works well for point estimates, but not for interval estimation. That is, in terms of uncertainty quantification, the quantizer prototypes are not just a smaller dataset from which to resample. Quantization suppresses precisely the sampling noise that interval estimation requires. We can, however, recover a notion of sampling variability by studying how resampling variance interacts with a VQ partition: there is variation in \emph{how many} points land in each region, and also in \emph{which} points represent each region. The VQ objective minimizes the second part by construction (if the VQ is trained properly); in this work we exploit multinomial models of the first to obtain CIs.
+
+To achieve this, we replace explicit resampling with perturbation. Under bootstrap resampling, the counts $(n_1,\dots,n_M)$ of data in each region fluctuate acording to a multinomial covariance. Importantly, no simulation is required to learn it. The only unknown is how sensitive the estimator is to each changing count, and that is a derivative: perturb one region's share of the data, re-evaluate $T$, and record the response. Our Quantized Infinitesimal Jackknife (QIJ) does exactly this, via $\mathcal{O}(M)$ deterministic evaluations of $T$ in total, and propagates the counts' known covariance through these responses (the delta method), yielding the variance and skewness of $T$'s sampling distribution. The result is a VQ-based confidence interval with no resampling at any stage (Sect.~\ref{sec:method}).
+
+These VQ-based confidence intervals are based on the observation that we can decompose an estimator $T$'s total variance into two parts. The first captures the estimator variance that would occur from distributing a resampling of points into the existing partition (i.e., Voronoi regions would obtain new counts), while the second describes estimator impact from within-region point variation. QIJ measures the first directly, and recovers the second from the same partition statistics. Crucially, decomposing at a different $M$ returns the same total (i.e., the total variance does not depend on the partition). We use this as a correctness check in Sect.~\ref{sec:results}.
+
+\paragraph{Related work.} The infinitesimal jackknife originates with Jaeckel \cite{jaeckel1972}; Efron \cite{efron1982} connects it to the bootstrap. Wager et al.\ \cite{wager2014}, similarly motivated by an estimator too expensive to resample, apply it to random forests, though their derivative is taken with respect to individual observation weights, whereas ours is taken with respect to Voronoi masses. The Bag of Little Bootstraps \cite{kleiner2014} and $m$-out-of-$n$ subsampling \cite{bickel1997} reduce the size of each resample but still resample, and their approximation error is asymptotic and unobserved; QIJ never resamples, and its approximation error is a reported quantity. The influence-function machinery we rely on is classical robust statistics \cite{hampel1974,stefanski2002}.
+
+
+% ======================================================================
+\section{The Quantized Infinitesimal Jackknife}\label{sec:method}
+% ======================================================================
+
+\subsection{Setup: Influence Functions and Bin Influences}\label{sec:setup}
+
+Let $X=\{x_i\}_{i=1}^{N}$ be iid from $F$, let $\hat{F}$ be its empirical
+distribution, and let $T$ be a functional on distributions, so that the
+estimand is $\theta = T(F)$ and the estimator is its plug-in
+$\hat{T} = T(\hat{F})$. The influence function of $T$ at $\hat{F}$ is
+%
+\begin{equation}\label{eq:if}
+  \psi(x) \;=\; \lim_{\varepsilon \to 0}
+  \frac{T\!\big((1-\varepsilon)\hat{F} + \varepsilon\,\delta_x\big) - T(\hat{F})}
+       {\varepsilon},
+\end{equation}
+%
+the derivative of $T$ in the direction of a point mass at $x$, i.e.\ how much
+the estimate moves per unit of probability placed at $x$; it satisfies
+$\sum_i \psi(x_i) = 0$. The classical linearization
+$\hat{T} - \theta \approx \tfrac{1}{N}\sum_i \psi(x_i)$~\cite{vonmises1947,hampel1974}
+underlies both the jackknife and the bootstrap, and gives
+$\operatorname{Var}(\hat{T}) \approx \mathbb{E}[\psi^2]/N$.
+
+\rev{Two vector quantizers appear below. The \XVQ{} quantizes the data: its prototypes are $w_j$, each with a receptive field $\mathrm{RF}_j$ of $n_j$ points and mass $p_j = n_j/N$. The \IVQ{} quantizes an estimate of the influence itself, and its cells, which we call bins, are indexed by $k$. The construction that follows applies to any set $K$ of data points, receptive field or bin.} The influence of a set $K$ with $n_K$ points is the derivative of $T$ with the point mass replaced by an equal spread of mass over the points of $K$:
+%
+\begin{equation}\label{eq:Uj}
+  U_K \;=\; \lim_{\varepsilon \to 0}
+  \frac{T\!\Big((1-\varepsilon)\hat{F}
+        + \frac{\varepsilon}{n_K}\sum_{i \in K} \delta_{x_i}\Big)
+        - T(\hat{F})}{\varepsilon}
+  \;=\; \frac{1}{n_K} \sum_{i \in K} \psi(x_i).
+\end{equation}
+%
+The perturbation raises the set's mass by $\varepsilon$ at the expense of the
+others, reweighting every point inside it identically (never individually).
+Since the derivative is linear in the direction perturbed, the response is the
+average of the individual responses $\psi(x_i)$, which is the second equality. \rev{For a bin we write $U_k$ and call it the bin influence.}
+
+Eq.~\eqref{eq:Uj} is the infinitesimal jackknife (IJ) of~\cite{jaeckel1972} with its perturbation space restricted to the masses of $M$ sets instead of $N$ observation weights. At $M = N$ each set holds a single point and $U_K = \psi(x_K)$; at $M = 1$ the single set gives $U = 0$. \rev{When $\psi$ has a closed form, the $U_K$ are averages of known numbers. This paper is about the other case, in which $T$ is available only as a program: one \emph{estimator evaluation} is a call $T(X,\omega)$ on the data with non-negative weights $\omega$ summing to $N$, and $U_K$ is obtained by finite differences of that call (Sect.~\ref{sec:difference}).}
+
+The counts obtained under resampling are jointly multinomial: redistributing $N$ draws into a fixed partition gives $\mathrm{Cov}(n_k, n_l) = N(p_k \delta_{kl} - p_k p_l)$, with no simulation required to learn this covariance structure. Propagating this known fluctuation through the derivatives via the delta method gives the variance estimate
+\begin{equation}\label{eq:Vcell}
+\Vcell \;=\; \frac1N \sum_{k=1}^{M} p_k\, U_k^{2},
+\end{equation}
+using the fact that $\sum_k p_k U_k = 0$. The same quantities supply the third moment of the influence distribution, from which the skewness correction of the BCa interval \cite{efron1987} follows with no additional evaluations; the median-bias constant $z_0$, conventionally taken from bootstrap replicates, is set to zero.
+
+\subsection{The Variance Decomposition}\label{sec:identity}
+
+With $U_k$ as above and $\mathrm{Var}_k(\ifl) = \tfrac{1}{n_k}\sum_{i \in k}(\ifl(x_i) - U_k)^2$ the spread of influence among the points inside bin $k$,
+\begin{equation}\label{eq:identity}
+\underbrace{\frac1N\sum_{i=1}^{N} \ifl(x_i)^{2}}_{N\,\Vtotal}
+\;=\;
+\underbrace{\sum_{k=1}^{M} p_k\, U_k^{2}}_{N\,\Vcell}
+\;+\;
+\underbrace{\sum_{k=1}^{M} p_k\, \mathrm{Var}_k(\ifl)}_{N\,\Vwithin}.
+\end{equation}
+This is the between/within variance decomposition applied to the influence values, and it holds \emph{algebraically} on any dataset and any partition. The left side contains no partition information, while both right-side terms depend on it strongly. \rev{The identity also states the obstacle that shapes the rest of the method. The bin influences $U_k$, however exactly they are obtained, say nothing about $\Vwithin$: averages over a set of points do not determine the spread inside the set. With bins that are the receptive fields of the \XVQ, $\Vwithin$ is small only where $\psi$ happens to vary little inside each Voronoi cell; on the multivariate $t$ and Fundamental Plane estimands of Sect.~\ref{sec:results}, receptive fields at $M = 40$--$50$ leave 54--80\% of the variance inside them, and no number of evaluations along their masses can recover it. Without a closed form for $\psi$, the only route is to build bins inside which $\psi$ is nearly constant, which requires knowing its shape before the finite differences are taken. The \XVQ{} supplies that shape cheaply (Sect.~\ref{sec:xvq}) and the \IVQ{} then makes $\Vcell$ nearly the whole of $\Vtotal$ (Sect.~\ref{sec:ivq}).}
+
+\subsection{Finite Differences Along a Bin's Mass}\label{sec:difference}
+
+\rev{Let $K$ be a bin with mass $p$. Raising its weight by a step $t$ and lowering every other point's in proportion gives weights $\omega_i(t) = (1-t) + t\,\mathbf{1}\{i \in K\}/p$, which sum to $N$: the multinomial direction of \eqref{eq:Vcell}. Write $T(t)$ for the estimator at $\omega(t)$, with $T(0) = \hat T$ shared by every bin. The derivative at $t = 0$ carries a truncation error from the step and a rounding error from the estimator's accuracy $\eta$, the relative size of the part of one evaluation that does not reproduce; balancing the two gives $\delta = (3\eta)^{1/3}$ for the three-point stencil $U_k = [-3T(0) + 4T(\delta) - T(2\delta)]/(2\delta)$, which also yields the second difference $\Delta^2 T_k = [T(0) - 2T(\delta) + T(2\delta)]/\delta^2$, and $\delta_f = 2\sqrt{\eta}$ for a single forward step. Steps go upward only, because a downward step makes a small bin's weights negative. The user declares $\eta$: machine precision for a closed form, the solver's tolerance for an iterative estimator. On our estimands the error of $\Vcell$ falls fourfold per halving of $\delta$, so the rule's step sits well inside the truncation regime.}
+
+\subsection{The $\mathcal{X}$-VQ and the Initial Influence Estimate}\label{sec:xvq}
+
+\rev{The shape of $\psi$ can be learned cheaply because $\psi$ is a derivative of $T$, and derivatives can be taken on a coarse version of the data. Fit the \XVQ{} with $\MX$ prototypes ($k$-means centroids; $\MX$ is set below) to the data in whitened coordinates. Evaluate $T$ on the prototypes as a weighted dataset of $\MX$ rows, each prototype carrying its mass, and then once more per prototype with that prototype's weight raised by $\delta_f$ and the others lowered in proportion. The differences, mass-centred, are the \emph{prototype influences} $I_j$: the derivative of $T$ at the quantized data along prototype $j$'s mass. They are influence values of the quantized distribution, not of the data, and the two can differ in scale: on the multivariate $t$ the estimator returns $\nu \approx 22$ on the quantized data against $5$ on the full data, and the $I_j$ are eleven times too large. Their ordering, however, agreed with the true influence at rank correlation $0.98$--$1.00$ on every estimand we tested, and ordering is what the next stage needs. The cost is $1 + \MX$ evaluations on $\MX$ rows.}
+
+\rev{A Gaussian process with an affine mean and a Mat\'ern-$3/2$ kernel is passed through the pairs $(w_j, I_j)$ \cite{rasmussen2006}; its width and noise level are set by maximum marginal likelihood, with the noise level profiled at each width and the smallest width allowed equal to the median distance between prototypes that the \XVQ's connectivity graph joins. The posterior mean at a data point is the \emph{initial influence estimate} $\psinull(x_i)$, and the posterior standard deviation is its uncertainty $\sigma_i$, small where prototypes are dense and large in the tails. The affine mean matters: a zero-mean kernel model returns to zero beyond the outermost prototype, and on heavy-tailed data the most influential points lie exactly there. No estimator evaluations are spent here.}
+
+\rev{\paragraph{How many prototypes.} Stage 1 costs about $\MX^2$ rows of evaluation and the finite differences of stage 2 about $(1 + 2q\,M_{\mathrm{ref}})N$ rows for $q$ outputs, with $M_{\mathrm{ref}}$ the bin count of Sect.~\ref{sec:ivq}. We give the \XVQ{} the same row budget as the finite differences it serves,
+\begin{equation}\label{eq:MX}
+\MX \;=\; \Big\lceil \sqrt{(1 + 2q\,M_{\mathrm{ref}})\,N/2}\,\Big\rceil,
+\end{equation}
+floor 20, cap $N/2$: $133$ prototypes for a one-output estimator at $N = 1000$ and $262$ for the four-output Fundamental Plane. A rule from accuracy is not available in advance. In Sect.~\ref{sec:res-valid} the loss of the bins built from $\psinull$ against the ideal ones fell as $1/\MX^2$ on the Fundamental Plane and as $1/\MX$ on the Pareto shape, and the ten-dimensional multivariate $t$ needed fewer prototypes than the three-dimensional Fundamental Plane, so neither dimension nor anything else known before running predicts the count. The budget is known before running, and so is the total cost, about twice the finite differences against $BN$ rows for the bootstrap. The count depends on $q$ because the budget does, not because accuracy does, and no prior rule guarantees the same alignment on an unseen estimator; the diagnostics of Sect.~\ref{sec:outputs} say whether the \XVQ{} was fine enough.}
+
+\subsection{The $\mathcal{I}$-VQ and Gain-Driven Refinement}\label{sec:ivq}
+
+\rev{Evaluate $T$ on the full data once. Then quantize the values $\psinull(x_i)$ with a one-dimensional $k$-means into $\MI$ bins, each the set of data points whose initial influence estimate falls in one interval. For an optimal one-dimensional quantizer with $M$ levels the share of the variance left inside the bins is about $\kappa/M^2$ \cite{panter1951,graf2000}, with $\kappa = 2.7$ for normally distributed values, so a declared tolerance $\epsilon$ on that share gives $M_{\mathrm{ref}} = \lceil\sqrt{2.7/\epsilon}\,\rceil$, $17$ at $\epsilon = 0.01$. We start at $\MI = M_{\mathrm{ref}}$ and let the finite differences decide the rest. Each initial bin is differenced with the three-point stencil, two evaluations on $N$ rows, giving $U_k$ and $\Delta^2 T_k$.}
+
+\rev{Refinement splits the bins where the finite differences say the grouping is too coarse. Every bin with more than one point carries a proposed split and an expected gain, the increase in $\Vcell$ the split would produce if $\psinull$ were right, scaled to the finite-differenced scale by $\rho^2$, the ratio of $\Vcell$ to the between-bin variance of $\psinull$. The split is by level, a two-means on the bin's $\psinull$ values, when the estimate varies inside the bin more than it is uncertain there; otherwise by adjacency, separating the points whose second-nearest prototype carries a higher prototype influence than their nearest, which for a jump between neighbouring prototypes is the side facing the far prototype. The bin with the largest expected gain is split; the smaller child is differenced with one forward step and the larger follows by subtraction, since a parent's bin influence is the mass-weighted sum of its children's. A lineage stops when its realized gain falls below the bin's share of the tolerance, $\epsilon\,\Vcell/L$ with $L$ the current number of bins, the loop stops when no expected gain exceeds that share, and at most $1 + \MX$ evaluations are spent refining. For a step-shaped influence such as a tail probability, the adjacency split isolates the far side of the jump and the level splits then localize it, down to single points, whose bin influences are exact. The ratio of realized to expected gains over the run is reported: it is how well $\psinull$ predicted.}
+
+\subsection{Outputs}\label{sec:outputs}
+
+\rev{Three quantities follow without a model. The between-bin term $\Vcell = \frac1N\sum_k p_k U_k^2$ over the final $L$ bins is finite-differenced on the full data, is a lower bound on $\Vtotal$ exact up to the step error, and rises with every split; on our estimands it is 99.3--100\% of $\Vtotal$. The bias term $\Bhat = \frac{1}{2N}\sum_k p_k \Delta^2 T_k$ over the initial bins is the second-order term of the expansion of $\hat T$ along the bin masses; it matched the known $O(1/N)$ bias on the test problems and is reported, not applied, since shifting the interval by it changed coverage by less than $0.001$. The BCa acceleration $\hat a_{\mathrm{BCa}}$ comes from the third moment of the refined estimate $\psih(x_i) = U_{k(i)} + \rho\,(\psinull(x_i) - \bar\psi_{0,k(i)})$. The remainder is predicted: $\Vwinhat = \rho^2\,\frac1N\sum_k p_k\,[\gamma_k\,\mathrm{Var}_k(\psinull) + v_k]$ over bins with more than one point, where $v_k$ is the variance of the model's error around its mean inside bin $k$ (the posterior covariance's diagonal mean minus its grand mean over the bin; the error common to the bin is already fixed by $U_k$) and $\gamma_k \le 1$ is the realized fraction of the predicted gain in the split that created the bin, so that a bin whose split showed the model's variation to be spurious contributes only its uncertainty. $\Vtothat = \Vcell + \Vwinhat$ is the variance estimate; on a near-two-valued influence, where $\Vcell$ already equals $\Vtotal$, the predicted remainder is a conservative excess (Sect.~\ref{sec:results}). The QIJ interval at level $q$, $\hqij{q}$, is the BCa-form interval with variance $\Vtothat$, acceleration $\hat a_{\mathrm{BCa}}$, median-bias constant zero and centre $\hat T$. Reported alongside: evaluation counts by size, rows processed normalized by $N$, wall time, $L$ and the split counts, $\rho$, the ratio of realized to expected gains, and the kernel width and noise level with a note when either sits on a bound.}
+
+\subsection{Scope}\label{sec:scope}
+
+\rev{Four conditions bound the method. The estimator must accept a weighted point set and be well defined on coarse weighted data within the data's range; a failure there is the estimator's, not the method's. An estimator that is not differentiable in the weights (a quantile, a hard threshold, model selection inside $T$) is out of scope, as for every influence-based method. An estimator that is differentiable in the weights but whose influence is discontinuous in $x$, such as a tail probability, is in scope: the initial estimate smooths the jump, and the adjacency splits and level splits recover it (Sect.~\ref{sec:results}). A point whose true influence differs from its neighbours' while every prototype around it carries the same prototype influence is invisible to both split rules; that is the one blind spot. The value of $T$ at the quantized data is the functional at that distribution and is never reported as an estimate of $\theta$. The accuracy $\eta$ is the user's declaration and is not checked. The multinomial covariance in \eqref{eq:Vcell} assumes iid sampling.}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{f9.pdf}
+\caption{\rev{Stage 1 on a single draw ($N = 1000$). (a) Pareto shape parameter: prototype influences $I_j$ at the $133$ prototypes (points) and the initial influence estimate $\psinull$ (line) with its $\pm\sigma$ band. (b) Pareto tail probability $P(X > c)$ with $c$ the $0.99$ quantile: the prototype influences are two-valued, and $\psinull$ smooths the jump into a ramp that the adjacency and level splits of Sect.~\ref{sec:ivq} resolve on the full data. (c) Fundamental Plane coefficient $a$: prototype influences over two data coordinates, at the $262$ prototypes.}}
+\label{fig:field}
+\end{figure}
+
+% ======================================================================
+\section{Experimental Data}\label{sec:data}
+% ======================================================================
+
+We evaluate QIJ on three datasets. Two are from distributional families in which the ground truth is known, and one is a real-world model from observational astronomy with vector-valued estimands. \rev{Each has a closed-form influence function, which QIJ never sees: the pipeline treats every estimator as a program that returns a value for a weighted dataset, and the closed form serves only to evaluate the result. In what follows, $S = 1000$ Monte Carlo draws of size $N = 1000$ were taken from each data process. QIJ and a standard nonparametric bootstrap ($B = 2000$ replicates) were run on identical draws paired by seed. QIJ's declared inputs were $\epsilon = 0.01$ throughout and $\eta$ at machine precision for the closed-form estimators and $10^{-12}$ for the two solved by an optimizer or an eigendecomposition; the rule \eqref{eq:MX} then gave $133$ prototypes for each one-output estimator and $262$ for the Fundamental Plane, every coordinate started from $17$ bins, and refinement ended at $20$ to $50$. Nothing was tuned per dataset.} The astronomical case uses an empirical population protocol where a large catalog is treated as the population, draws are sampled from it with replacement, and the target $\theta_{\mathrm{true}}$ is taken to be the parameter vector computed from the full catalog. Below, we describe the datasets individually.
+
+\paragraph{Pareto.} A heavy-tailed distribution, with closed-form influence functions for both estimators (the shape parameter's maximum-likelihood estimator, and a tail probability), so every stage of the pipeline can be checked analytically. \rev{The shape parameter's influence is unbounded in $\log x$, which makes the tail beyond the outermost prototype the test of the initial estimate; the tail probability's influence is a step, which makes it the test of the refinement.}
+
+\paragraph{Multivariate $t$ (MVT).} A ten-dimensional, elliptically symmetric distribution with two estimands: the degrees of freedom $\nu$ (estimated by profile maximum likelihood), and a tail probability. This tests whether our construction survives higher data dimension. \rev{The $\nu$ estimator is also the case in which the quantized data are far from the data: centroids thin the tails, and the estimator returns $\nu \approx 22$ on $133$ centroids of a $\nu = 5$ sample.}
+
+\paragraph{Galaxy fundamental plane.} The galaxy Fundamental Plane dataset (FP) comprises 76{,}997 early-type galaxies drawn from the Sloan Digital Sky Survey Data Release 7 spectroscopic catalog \cite{abazajian2009}. 
+For each galaxy, the three Fundamental Plane observables are the aperture-corrected stellar velocity dispersion $\sigma$ (following the correction of \cite{jorgensen1995}), the 
+effective radius $R_e$ 
+, and a luminosity-based surface brightness proxy $I_e$.
+The Fundamental Plane is fit in log-space as $\log R_e = a\,\log\sigma + b\,\log I_e + c$ via least squares. The estimands are the coefficient vector $(a,b,c)$ and the intrinsic scatter about the plane. \rev{The four outputs come from one evaluation, so the Fundamental Plane is the vector case: one \XVQ{} and four \IVQ{}s, the four sharing every evaluation.}
+
+
+% ======================================================================
+\section{Results}\label{sec:results}
+% ======================================================================
+
+\subsection{Examining the Variance Decomposition}\label{sec:res-valid}
+
+Because the left side of \eqref{eq:identity} contains no $M$-dependence, it is  constant with respect to the number of prototypes used to quantize the data. Figure~\ref{fig:invariance} confirms this, with each component of \eqref{eq:identity} averaged across the $S = 1000$ Monte Carlo draws: $\Vcell$ rises ($\Vwithin$ falls) as the partition refines, but their sum is flat. %Panel (a) also quantifies the split: for the one-dimensional Pareto, $\Vcell$ is more than two orders of magnitude higher than $\Vwithin$, meaning the perturbation responses $U_j$ carry almost all of the variance information in this case.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{f3.pdf}
+\caption{
+%The variance decomposition (eq.~\eqref{eq:identity}) is partition-invariant. 
+Each panel shows the three terms of ~\eqref{eq:identity}) against increasing $M$ (finer quantization), averaged over the $S = 1000$ Monte Carlo draws. As the partition refines, the between-RF term $V_\mathrm{btw}$ (squares)
+rises and the within-RF term $V_\mathrm{win}$ (triangles) falls, while
+their sum $V_\mathrm{tot}$ (circles) is constant in $M$. (a) show the decomposition for the Pareto shape parameter; (b) shows the MVT degrees of freedom $\nu$; (c) shows the FP coefficient $a$. 
+}
+\label{fig:invariance}
+\end{figure}
+
+
+
+\subsection{Validation against the Bootstrap}
+
+The estimator variances shown in Figure~\ref{fig:invariance} are similar to those identified by the standard bootstrap, which is reported in Figure~\ref{fig:coverage}(a), broken out by estimand. The paired ratio $\log(V_{\mathrm{QIJ}}/V_{\mathrm{boot}})$ conveys agreement ($=0$) or disagreement ($\neq 0$) of QIJ's estimated sampling variance, compared to that of the standard bootstrap. Offsets of order $1/N$ are expected, since QIJ omits higher-order terms and the bootstrap carries its own $O(1/N)$ bias.
+Figure~\ref{fig:coverage}(b) compares nominal and empirical coverage of the two interval estimators; QIJ tracks the unity slope, whereas standard bootstrap is mildly conservative at low nominal levels; at commonly used levels (0.90 and above) both methods are nominal within Monte Carlo error (gray shaded band). Figure~\ref{fig:coverage}(c) compares mean interval widths from both methods at the nominal level at which each method attains 95\% empirical coverage (0.955 for QIJ, 0.949 for the bootstrap): the width ratios lie between 1.004 and 1.065, largest for the two tail-probability estimands.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{f2.pdf}
+\caption{Validation against the standard bootstrap. (a) Mean $\log(V_{\mathrm{QIJ}}/V_{\mathrm{boot}})$ per estimand, with 95\% CI whiskers (smaller than the markers at $S = 1000$); the shaded band marks $\pm 0.05$. All estimands fall inside the band except the MVT $\nu$, just outside at $-0.055$. (b) Empirical versus nominal coverage, pooled over all datasets and estimands, overlaid on the $\pm 1.96\sqrt{p(1-p)/S}$ Monte Carlo standard error band. QIJ tracks the diagonal cleanly, whereas the bootstrap is mildly conservative at low nominal levels. 
+%and both are nominal at common levels (e.g., 0.90, 0.95, 0.99). 
+(c) Mean interval width ratios (QIJ over bootstrap)  evaluated at the nominal level where each method attains 0.95 level empirical coverage (0.955 for QIJ, 0.949 for the bootstrap); the shaded band marks $\pm 10\%$. The ratios range from 1.004 to 1.065, with the largest for the tail-probability estimands.}
+\label{fig:coverage}
+\end{figure}
+
+\subsection{The Computation-Accuracy Frontier}\label{sec:res-compute}
+
+To produce the intervals presented in Figure~\ref{fig:coverage}, QIJ demands a number of evaluations of $T$ that scales with $M$ rather than with $B$. Compared to the standard bootstrap, where hundreds to thousands of replicates (and associated $T$ evaluations) are needed, this is one to two orders of magnitude cheaper. To demonstrate this cost savings, Figure~\ref{fig:compute} shows the interval width each method achieves as a function of the number of evaluations of $T$ when estimating the $\sigma$ (velocity dispersion) slope of the galaxy Fundamental Plane data. The intervals in Figure~\ref{fig:compute} are computed from analytic influence functions and plotted at the location $M{+}1 = 51$ that QIJ occupies when numerical derivaties are required to estimate its influence funtions $\psi$. The standard bootstrap does not match this width until $b \approx 1800$ replicates/$T$ evaluations have occurred (the figure shows all widths relative to that computed from the standard bootstrap's width after 2000 replicates). Both methods target the same population coefficient $a$, but QIJ achieves widths comparable to the standard bootstrap with far fewer ($51 \ll {\sim}1800$) estimator evaluations.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=.85\linewidth]{f7.pdf}
+\caption{Computation frontier on the FP coefficient $a$. For each Monte Carlo draw, the bootstrap 95\% interval width is recomputed from the first $b$ replicates (in sequence) and then compared to the full $B = 2000$ reference (dashed line: mean over the $S = 1000$ draws; ribbon: interquartile range); the error at $b = B$ is zero by construction. The QIJ point shows the width of QIJ's deterministic interval against the same converged bootstrap reference (interquartile range as whiskers). The width is computed from analytic influence functions and plotted at the abscissa $M{+}1 = 51$ that QIJ's derivative-free route would require when $M = 50$. QIJ's width is partition-invariant (see Fig.~\ref{fig:invariance}), so a single operating point suffices. The standard bootstrap does not achieve the width accuracy of QIJ intervals until replicate $\sim$1800 (cumulatively requiring $\sim$1800 estimator evaluations).}
+\label{fig:compute}
+\end{figure}
+
+% ======================================================================
+\section{Conclusions and Future Work}\label{sec:conclusions}
+% ======================================================================
+
+%We have shown that a fitted vector quantizer supports nonparametric interval estimation. The route is not resampling from the partition; this would require variability that the quantizer itself minimizes away. Instead, we harness the Voronoi partition learned by the VQ to study perturbations of estimator influence across the learned manifold. In a VQ setting, bootstrap resampling can be re-cast as a process of changing RF counts. By analyzing an estimator's sensitivity to these changing counts \textit{locally} (across the learned manifold), we can construct a notion of global estimator variance, which we use to power QIJ's interval estimation. Across our three test cases, including a real astronomical problem with empirically derived truth, QIJ delivers nominal coverage at bootstrap-matched widths, at a small fraction of the computation.
+
+We have shown that a fitted vector quantizer supports nonparametric
+interval estimation. The route to this is not via resampling from the partition, which would require the same sampling variability that the quantizer minimizes away, but, instead, differentiation across it. The receptive fields supply a coarse basis in which bootstrap resampling becomes a redistribution of counts whose multinomial fluctuations are known, and the estimator's sensitivity to those counts is measurable in a number of evaluations set by $M$, rather than $B$. This construction relies on the variance decomposition of \eqref{eq:identity}, which is an algebraic identity on any dataset and any partition. 
+
+Across eight estimands on three datasets, including a real astronomical problem with empirically derived truth, QIJ's variance estimates agree with
+the bootstrap's to within $0.05$ (in log-ratio) for all but one; its
+intervals track nominal coverage across the level grid; and its widths fall
+within $7\%$ of bootstrap widths. QIJ inherits the infinitesimal jackknife's requirement that the estimator be smooth in the data weights, and it estimates variance without correcting bias.
+
+This work is an attempt at harnessing VQ in the specification and study of uncertainty quantification. Our study has revealed several directions for future work, including how VQs should be prescribed (i.e., how many prototypes used for quantization) when the goal is inference rather than compression, which could be useful for inference in large full catalogs of data.
+
+\begin{credits}
+\subsubsection{\ackname} JT and SSRO acknowledge support from NSF AAG 2107942, NASA ADAP 80NSSC23K0476, and the US NSF under Cooperative Agreement 2421782 and the Simons Foundation grant MPS-AI-00010515 awarded to the NSF-Simons AI Institute for Cosmic Origins --- CosmicAI, \url{https://www.cosmicai.org/}. SSRO also acknowledges support from a Peter O'Donnell Distinguished Researcher Fellowship and a Donald Harrington Fellowship.
+\subsubsection{\discintname} The authors have no competing interests to declare.
+\end{credits}
+
+\bibliographystyle{splncs04}
+\bibliography{refs}
+
+\end{document}
