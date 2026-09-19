@@ -15,6 +15,7 @@ through `Counter` (plan §1; interface sheet §4 `core/counter.py`).
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from typing import Optional
 
 import numpy as np
@@ -115,6 +116,25 @@ class QIJ:
             )
             for c, name in enumerate(outputs)
         ]
+        # A failed initial-bin evaluation NaNs the whole draw, not just
+        # the coordinate it happened on (plan §4): the between-bin term
+        # and everything after it rests on that measurement, and every
+        # output shares the same stage-2 initial bins in spirit (each
+        # coordinate's own build), so one coordinate's failure means the
+        # draw as a whole is not a usable QIJ draw. Diagnostics that
+        # genuinely happened (bin counts, evaluations, wall time, the
+        # per-coordinate `L`/`M_used`/`labels`/split counts) are left
+        # alone -- only the variance quantities (V_btw, V_win_hat,
+        # V_tot_hat, B_hat, a_bca) are voided to NaN, on every
+        # coordinate, not just the one whose own bins failed.
+        if any(cr.failed for cr in coordinates):
+            coordinates = [
+                replace(
+                    cr, V_btw=float('nan'), V_win_hat=float('nan'),
+                    V_tot_hat=float('nan'), B_hat=float('nan'), a_bca=float('nan'),
+                )
+                for cr in coordinates
+            ]
         wall_time_refinement = time.perf_counter() - t0
         ev3, rows3 = counter.snapshot()
 

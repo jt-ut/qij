@@ -259,7 +259,11 @@ def bin_differences(X: np.ndarray, counter, theta_hat: np.ndarray, binset: BinSe
     shared base value theta_hat (evaluated once by the caller and
     never re-evaluated here), using `core.differences.difference`
     (central where feasible, one-sided otherwise -- selected
-    automatically, never forced).
+    automatically, never forced). The step delta = (3*eta)^(1/3) is
+    relative to the bin's own mass: `difference` turns it into the
+    weight parameter t = delta * p_k / (1 - p_k) with which it calls
+    `evaluate`, so the bin's mass moves to p_k * (1 + delta) whatever
+    p_k is, and U_k is the derivative with respect to t.
 
     Single-bin shortcut: when `binset.M_used == 1`, perturbing the
     whole data's mass changes no weight, so U = 0 and d2T = 0 with no
@@ -268,7 +272,7 @@ def bin_differences(X: np.ndarray, counter, theta_hat: np.ndarray, binset: BinSe
 
     Otherwise, for each of the M_used bins k, in order:
         evaluate(t) = counter(X, perturbed_weights(ones(N), labels == k, t))
-        U_k, d2T_k, _ = difference(theta_hat, p[k], step, evaluate)
+        U_k, d2T_k, _ = difference(theta_hat, p[k], delta, evaluate)
     If U_k or d2T_k carries any NaN -- one of `evaluate`'s two calls
     returned a failed fit -- this is a failed evaluation of an initial
     bin (ruled 18 September): there is nothing to salvage, so the loop
@@ -301,7 +305,7 @@ def bin_differences(X: np.ndarray, counter, theta_hat: np.ndarray, binset: BinSe
         return replace(binset, U=np.zeros((1, q)), d2T=np.zeros((1, q)),
                         centering_residual=np.zeros(q), failed=False)
 
-    step = central_step(eta)
+    delta = central_step(eta)
     p = binset.p
     U = np.empty((M_used, q))
     d2T = np.empty((M_used, q))
@@ -313,7 +317,7 @@ def bin_differences(X: np.ndarray, counter, theta_hat: np.ndarray, binset: BinSe
             omega = perturbed_weights(np.ones(N), _mask, t)
             return counter(X, omega)
 
-        U_k, d2T_k, _one_sided = difference(theta_hat, float(p[k]), step, evaluate)
+        U_k, d2T_k, _one_sided = difference(theta_hat, float(p[k]), delta, evaluate)
         if np.any(np.isnan(U_k)) or np.any(np.isnan(d2T_k)):
             return replace(
                 binset, U=np.full((M_used, q), np.nan), d2T=np.full((M_used, q), np.nan),

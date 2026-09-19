@@ -3,8 +3,12 @@ The refinement loop: per estimand coordinate, starting from the
 𝓘-VQ's initial bins (`ivq.build_bins`, measured on the full data by
 `ivq.bin_differences` with the natural central/one-sided rule),
 adaptively split the bin with the largest expected gain, spending one
-forward evaluation (`differences.forward_step`) per split on the
-smaller child and deriving the larger child by mass balance, until the
+forward evaluation per split on the smaller child -- at the relative
+step delta_f (`differences.forward_step`), i.e. the weight parameter
+t_small = delta_f * p_small / (1 - p_small), so the child's mass rises
+by the fraction delta_f of itself and U_small = [T(omega_small) -
+T_hat] / t_small stays the derivative with respect to t -- and
+deriving the larger child by mass balance, until the
 largest expected gain drops below a tolerance `eps * V_btw / L` or a
 cost guard (at most `1 + M_X_used` refinement evaluations) binds. The
 between term V_btw only ever rises through this; the within term
@@ -45,7 +49,7 @@ a failed fit returns NaN, plan §4). Nothing is retried in either case.
 
 THE SETTLED FORMULA (final; not open to reinterpretation):
 
-    V_win_hat = rho^2 * (1/N) * sum_k p_k * [gamma_k * Var_k(psi0_hat) + v_k]
+    V_win_hat = rho^2 * (1/N) * sum_k p_k * gamma_k * [Var_k(psi0_hat) + v_k]
 
 over bins holding more than one point. `v_k` is the within-bin
 posterior variance from `influence_model.bin_posterior_variance`.
@@ -54,9 +58,13 @@ bin k, clipped to [0, 1]; both children of a split take that split's
 ratio; `gamma_k = 1` for a bin never split, and `gamma_k = 1` whenever
 the split's expected gain is not strictly positive or either quantity
 (realized, expected) is non-finite -- no usable information, so the
-term is not down-weighted. V_win_hat is computed for every multi-point
-final bin in one call to `bin_posterior_variance` so the kernel work
-for v_k is done once.
+term is not down-weighted. `gamma_k` scales the WHOLE bracket: a low
+gain ratio is measured evidence that the bin holds no variation the
+model successfully predicts, and the model's own uncertainty `v_k` is
+part of the prediction being discounted; bins never split keep
+gamma_k = 1 and have small `v_k` anyway. V_win_hat is computed for
+every multi-point final bin in one call to `bin_posterior_variance` so
+the kernel work for v_k is done once.
 
 Dropped from the reference implementation this is ported from: the
 `FinalBinSet` dataclass (the final bin arrays are local bookkeeping
@@ -84,7 +92,7 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 
-from .differences import forward_step, perturbed_weights
+from .differences import forward_step, perturbed_weights, step_parameter
 from .influence_model import bin_posterior_variance
 from .ivq import BinSet, between_terms, bin_differences, build_bins, kmeans_1d
 from .outputs import acceleration
@@ -137,6 +145,16 @@ class CoordinateResult:
                         0 when stage 2's own initial-bin measurement
                         failed (`ivq.BinSet.failed`), since the
                         refinement loop never starts.
+    failed              True only when THIS coordinate's own
+                        initial-bin measurement failed (set by
+                        `_failed_result`; False for a normal or
+                        degenerate/constant-path coordinate). `qij.py`
+                        reads this across all q coordinates: if any one
+                        is True, the whole draw's initial-bin
+                        measurement is compromised (plan §4), so every
+                        coordinate's variance quantities (V_btw,
+                        V_win_hat, V_tot_hat, B_hat, a_bca) are voided
+                        to NaN there -- not just this one's.
     """
 
     coordinate: int
@@ -156,6 +174,7 @@ class CoordinateResult:
     M_X: int
     M_used: int
     n_refine_evals: int
+    failed: bool = False
 
 
 def _variance(values: np.ndarray) -> float:
@@ -249,7 +268,10 @@ def _failed_result(coordinate: int, name: str, N: int, bins0: BinSet, M_X_used: 
     built even though their measurement failed). No refinement is
     attempted, so its counts are 0 and `n_refine_evals` is 0; the
     evaluations `counter` already spent are `Counter`'s own count, not
-    reported on this result. Nothing is retried."""
+    reported on this result. Nothing is retried. `failed=True` marks
+    this coordinate for `qij.py`, which voids every coordinate's
+    variance quantities on the draw when any one of them failed here
+    (plan §4: a failed initial-bin evaluation NaNs the whole draw)."""
     field = np.full(N, np.nan, dtype=float)
     return CoordinateResult(
         coordinate=coordinate, name=name,
@@ -258,6 +280,7 @@ def _failed_result(coordinate: int, name: str, N: int, bins0: BinSet, M_X_used: 
         L=bins0.M_used, n_level_splits=0, n_adjacency_splits=0,
         rho=float('nan'), gain_ratio=float('nan'),
         M_X=M_X_used, M_used=bins0.M_used, n_refine_evals=0,
+        failed=True,
     )
 
 
@@ -434,9 +457,13 @@ def run_refinement(
         else:
             idx_small, idx_large = idx_b, idx_a
 
+        p_small = idx_small.size / N
+        p_large = idx_large.size / N
+        t_small = step_parameter(delta_f, p_small)
+
         mask_small = np.zeros(N, dtype=bool)
         mask_small[idx_small] = True
-        omega = perturbed_weights(np.ones(N), mask_small, delta_f)
+        omega = perturbed_weights(np.ones(N), mask_small, t_small)
         T_small = np.asarray(counter(X, omega), dtype=float)
         n_refine_evals += 1
 
@@ -450,9 +477,7 @@ def run_refinement(
             best['open'] = False
             continue
 
-        U_small = (T_small - theta_hat) / delta_f - bins0.centering_residual
-        p_small = idx_small.size / N
-        p_large = idx_large.size / N
+        U_small = (T_small - theta_hat) / t_small - bins0.centering_residual
         p_parent = best['n'] / N
         U_parent = best['U']
         U_large = (p_parent * U_parent - p_small * U_small) / p_large
@@ -513,7 +538,7 @@ def run_refinement(
             psi_leaf = psi0_c[idx]
             var_k = _variance(psi_leaf)
             v_k = v_by_id[leaf['id']]
-            V_win_hat += (leaf['n'] / N) * (leaf['gamma'] * var_k + v_k)
+            V_win_hat += (leaf['n'] / N) * leaf['gamma'] * (var_k + v_k)
     V_win_hat = (V_win_hat * final_rho2) / N if np.isfinite(final_rho2) else float('nan')
     V_tot_hat = V_btw + V_win_hat
 

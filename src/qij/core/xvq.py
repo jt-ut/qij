@@ -24,7 +24,7 @@ from typing import Callable, Tuple
 import numpy as np
 from vqlp import VQFitter
 
-from .differences import forward_step, perturbed_weights
+from .differences import forward_step, perturbed_weights, step_parameter
 
 _KAPPA_REF = 2.7
 
@@ -153,12 +153,14 @@ def prototype_influences(
     Prototype influences (method outline steps 2-3): evaluate T once on
     the prototypes W_X (M_used, d), in T's native coordinates, with
     weights M_used * p, for the base value theta_Q; then for each
-    prototype j, raise its weight by the forward step delta_f =
-    2*sqrt(eta) along e_j - p, lowering the rest in proportion
-    (`differences.perturbed_weights`), and difference the re-evaluation
-    against theta_Q. Mass-centred so sum_j p_j I_proto[j] = 0 (the
-    constant-path test's scale reference is theta_Q, not this mean,
-    which is ~0 by construction).
+    prototype j, raise its mass by the forward step delta_f =
+    2*sqrt(eta) OF ITSELF -- the weight parameter t_j =
+    step_parameter(delta_f, p_j) along e_j - p, lowering the rest in
+    proportion (`differences.perturbed_weights`) -- and difference the
+    re-evaluation against theta_Q with respect to t_j, which is the
+    forward difference divided by t_j. Mass-centred so
+    sum_j p_j I_proto[j] = 0 (the constant-path test's scale reference
+    is theta_Q, not this mean, which is ~0 by construction).
 
     1 + M_used evaluations of `counter` on M_used rows: O(M_used),
     never O(N).
@@ -174,8 +176,9 @@ def prototype_influences(
     for j in range(M_used):
         member = np.zeros(M_used, dtype=bool)
         member[j] = True
-        omega = perturbed_weights(omega0, member, delta_f)
-        I_proto[j] = (counter(W_X, omega) - theta_Q) / delta_f
+        t_j = step_parameter(delta_f, float(p[j]))
+        omega = perturbed_weights(omega0, member, t_j)
+        I_proto[j] = (counter(W_X, omega) - theta_Q) / t_j
 
     # A failed evaluation at a prototype is a missing response (ruled 18
     # September): centre over the finite prototypes only, mass-weighted
