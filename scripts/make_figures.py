@@ -7,18 +7,22 @@ no estimator is re-run, no dataset is redrawn.
     python scripts/make_figures.py <run_dir> --cost-vs-n <cost_dir> [--lncs]
 
 F2, F3, F7 and F9 are rendered from <run_dir> (a main or smoke run).
-F10 needs the cost-vs-N study's per-N runs; --cost-vs-n names a
-directory holding one subdirectory per N, named by the integer N (e.g.
-`N1000`, `N3000`, ...), each itself a normal run_dir containing
-fp/fp/{truth,qij}.parquet and boot.h5 -- no product records N (plan
-section 5's schema has no N column), so this directory-naming
-convention is this script's own, not a pinned interface.
+F10 needs the cost-vs-N study's per-N products; --cost-vs-n names the
+directory a `cost_vs_n.yaml` run wrote (`study.py`'s own multi-N
+layout, module docstring there): `<cost_dir>/<dataset>/<estimator>/
+N<size>/{truth.parquet, qij.parquet, boot.h5, ...}`, one (dataset,
+estimator) pair with several `N<size>` subdirectories. Discovered by
+globbing for `truth.parquet` under `N*` directories, the same way
+every other figure discovers its products -- no dataset or estimator
+name is assumed, so this works for a cost study on any estimator.
 """
 
 from __future__ import annotations
 
 import argparse
+import glob
 import os
+import re
 
 from qij import figures
 
@@ -33,18 +37,21 @@ def _save(fig, out_dir: str, name: str, lncs: bool) -> None:
 
 
 def _cost_dirs(root: str) -> dict:
-    """{N: run_dir} for every N-named subdirectory of `root` (see the
-    module docstring's --cost-vs-n convention)."""
+    """{N: product_dir} for the cost-vs-N study's one (dataset,
+    estimator) pair under `root` -- `study.py` writes a multi-N run's
+    products under `<root>/<dataset>/<estimator>/N<size>/`, so the
+    `N<size>` directories are found by globbing for `truth.parquet`
+    three levels down, not by assuming `root`'s immediate children are
+    the N directories or that the pair is any particular dataset or
+    estimator (see the module docstring)."""
     out = {}
-    for name in sorted(os.listdir(root)):
-        path = os.path.join(root, name)
-        if not os.path.isdir(path):
+    pattern = os.path.join(root, "*", "*", "N*", "truth.parquet")
+    for truth_path in sorted(glob.glob(pattern)):
+        n_dir = os.path.dirname(truth_path)
+        m = re.fullmatch(r"N(\d+)", os.path.basename(n_dir))
+        if m is None:
             continue
-        try:
-            n = int(name.lstrip("N"))
-        except ValueError:
-            continue
-        out[n] = path
+        out[int(m.group(1))] = n_dir
     return out
 
 
@@ -53,7 +60,7 @@ def main() -> None:
     parser.add_argument("run_dir", help="products directory from qij.study (e.g. a main or smoke run)")
     parser.add_argument("--lncs", action="store_true", help="render at LNCS final size instead of the default")
     parser.add_argument("--cost-vs-n", type=str, default=None,
-                        help="directory holding one N-named subdirectory per cost_vs_n run, for F10")
+                        help="products directory from a cost_vs_n.yaml study run, for F10")
     args = parser.parse_args()
 
     for name, make in (("f2", figures.fig2), ("f3", figures.fig3),

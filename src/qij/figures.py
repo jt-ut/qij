@@ -34,10 +34,13 @@ worked around:
   the corner annotation uses the rank correlation between psi0 and psi
   (computable from qij_points.parquet alone) instead of rho.
 
-F10 reads the cost-vs-N study, which is one run (one config, one N)
-per out_dir; no product records N itself, so `fig10` takes an explicit
-`{N: run_dir}` mapping from its caller rather than discovering N from
-a directory-naming convention this file would have to invent.
+F10 reads the cost-vs-N study, which writes one (dataset, estimator)
+pair's products per `N<size>` subdirectory (`study.py`'s multi-N
+layout); no product records N itself, so `fig10` takes an explicit
+`{N: product_dir}` mapping from its caller -- each value already the
+directory holding that N's `truth.parquet`, `qij.parquet` and
+`boot.h5` -- rather than discovering N from a directory-naming
+convention this file would have to invent.
 """
 
 from __future__ import annotations
@@ -847,10 +850,13 @@ def _plot_f10_coverage(ax, cov_rows: list, outputs: list, level: float) -> None:
 
 
 def fig10(run_dirs: dict, lncs: bool = False, level: float = 0.95) -> plt.Figure:
-    """F10 -- cost against N, from the cost-vs-N study's FP runs.
-    `run_dirs` maps N -> the run_dir for that N's cost_vs_n run (see
-    the module docstring: no product records N, so this is supplied by
-    the caller, not discovered).
+    """F10 -- cost against N, from the cost-vs-N study's one (dataset,
+    estimator) pair. `run_dirs` maps N -> the product directory (the
+    `N<size>` directory itself, holding that N's `truth.parquet`,
+    `qij.parquet` and `boot.h5`) for that N's cost_vs_n run (see the
+    module docstring: no product records N, so this is supplied by the
+    caller, not discovered). Works for a cost study on any dataset and
+    estimator -- nothing here names one.
 
     (a) normalized rows vs N (QIJ, median/IQR over draws; bootstrap's
     is the fixed replicate count B, a horizontal reference).
@@ -869,7 +875,7 @@ def fig10(run_dirs: dict, lncs: bool = False, level: float = 0.95) -> plt.Figure
     outputs_ref = None
 
     for N in Ns:
-        path = os.path.join(run_dirs[N], "fp", "fp")
+        path = run_dirs[N]
         truth = pd.read_parquet(os.path.join(path, "truth.parquet"))
         outputs = _outputs(truth)
         if outputs_ref is None:
