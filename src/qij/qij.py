@@ -133,7 +133,12 @@ class QIJ:
         psi_oracle = None
         if influence is not None:
             psi_oracle = np.asarray(influence(X, np.ones(N)), dtype=float)
-            oracle_variance = np.mean(psi_oracle ** 2, axis=0)
+            # The variance of theta_hat, not of the influence: an estimator
+            # with influence psi has asymptotic variance mean(psi^2) / N.
+            # Without the 1/N this is off by exactly the sample size, which
+            # is how the validation run found it -- every oracle ratio came
+            # out at 0.001 on the nose at N = 1000.
+            oracle_variance = np.mean(psi_oracle ** 2, axis=0) / N
 
         return QIJResult(
             theta_hat=theta_hat, outputs=outputs, name=T.name, N=N,
