@@ -157,7 +157,8 @@ def _run_draw(dataset_fn, N, s, master_seed, estimator_items, vq_transform,
         prototypes_df = None
         if qij_res.psi_oracle is not None and s == POINTS_DRAW:
             points_df = _points_frame(
-                s, T.outputs, qij_res.psi0, qij_res.psi_oracle, qij_res.sigma)
+                s, T.outputs, qij_res.psi0, qij_res.psi_oracle, qij_res.sigma,
+                qij_res.coordinates, qij_res.xvq.bmu)
             prototypes_df = _prototypes_frame(
                 s, T.outputs, qij_res.xvq, qij_res.W_X, qij_res.I_proto)
 
@@ -277,17 +278,48 @@ def _partition_rows(s, outputs, psi_oracle, psi0_hat, Z, M_grid, seed):
     return rows
 
 
-def _points_frame(s, outputs, psi0_hat, psi_oracle, sigma) -> pd.DataFrame:
+def _points_frame(s, outputs, psi0_hat, psi_oracle, sigma,
+                   coordinates, bmu) -> pd.DataFrame:
     """`qij_points.parquet` rows for the designated draw: `s` (the draw
     index, so a join back to that draw's `qij.parquet` row is possible),
-    `i`, plus per output `psi0`, `psi` and `sigma` -- built as one dict
-    of column arrays, never a Python loop over the N points."""
+    `i`, `bmu`, plus per output `psi0`, `psi`, `sigma`, `psi_hat` and
+    `bin_label` -- built as one dict of column arrays, never a Python
+    loop over the N points.
+
+    The three influence columns are three different things and the
+    figure needs the third:
+
+      psi       the ORACLE influence, the truth to be recovered. Only
+                present where the estimator carries an analytic
+                influence, which is why this product exists at all.
+      psi0      psi0_hat, the influence MODEL's estimate at the point,
+                before any refinement -- the GP's posterior mean.
+      psi_hat   the method's own refined estimate, the glossary's
+                psi_hat: U_{k(i)} + rho*(psi0_i - psi0bar_k), the bin
+                influence the method MEASURED plus the model's
+                within-bin shape scaled by rho. This is what QIJ
+                actually produces and what the influence figure shows;
+                it is `core.refine.CoordinateResult.field`, already
+                computed, so storing it costs one column and no
+                evaluation.
+
+    `bmu` is each point's nearest prototype (`xvq.bmu`), and
+    `bin_label_<o>` its final I-VQ bin for that output
+    (`CoordinateResult.labels`). Both are needed because the true
+    influence of an empirical estimator is not defined AT a prototype:
+    a figure comparing psi_hat against psi per prototype has to average
+    each over that prototype's receptive field, which needs the
+    point-to-prototype map here. `bin_label` is the same idea one level
+    down, and is a cheap int column for a single draw."""
     N = psi0_hat.shape[0]
-    data = {'s': np.full(N, s), 'i': np.arange(N)}
+    data = {'s': np.full(N, s), 'i': np.arange(N),
+            'bmu': np.asarray(bmu, dtype=np.int32)}
     for j, o in enumerate(outputs):
         data[f'psi0_{o}'] = psi0_hat[:, j]
         data[f'psi_{o}'] = psi_oracle[:, j]
         data[f'sigma_{o}'] = sigma[:, j]
+        data[f'psi_hat_{o}'] = np.asarray(coordinates[j].field, dtype=float)
+        data[f'bin_label_{o}'] = np.asarray(coordinates[j].labels, dtype=np.int32)
     return pd.DataFrame(data)
 
 
