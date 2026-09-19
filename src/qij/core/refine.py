@@ -534,7 +534,7 @@ def run_refinement(
             # inherits its parent's value unchanged (see the split
             # branch below).
             d2T=float(bins0.d2T[k, coordinate]),
-            open=True, split=None, g=0.0, gamma=1.0,
+            open=True, split=None, g=0.0, gamma=1.0, strike=False,
         )
         next_id += 1
 
@@ -709,28 +709,42 @@ def run_refinement(
         # bin carried.
         parent_d2T = best['d2T']
 
+        # Two-strike closing rule: a below-tolerance split no longer
+        # closes its children outright. `children_strike` marks
+        # whether Delta fell below tau_at_selection at THIS split; the
+        # children only actually close if the PARENT (`best`) was
+        # itself already carrying a strike, i.e. this is the SECOND
+        # consecutive below-tolerance split in this lineage. A single
+        # below-tolerance split now just flags the children and lets
+        # them be re-proposed exactly like the above-tolerance branch.
+        children_strike = Delta < tau_at_selection
+        close_children = children_strike and best['strike']
+
         del leaves[best['id']]
 
         leaf_small = dict(
             id=next_id, indices=idx_small, n=int(idx_small.size),
-            U=U_small, d2T=parent_d2T, open=True, split=None, g=0.0, gamma=gamma_children,
+            U=U_small, d2T=parent_d2T, open=True, split=None, g=0.0,
+            gamma=gamma_children, strike=children_strike,
         )
         leaf_large = dict(
             id=next_id + 1, indices=idx_large, n=int(idx_large.size),
-            U=U_large, d2T=parent_d2T, open=True, split=None, g=0.0, gamma=gamma_children,
+            U=U_large, d2T=parent_d2T, open=True, split=None, g=0.0,
+            gamma=gamma_children, strike=children_strike,
         )
         next_id += 2
         leaves[leaf_small['id']] = leaf_small
         leaves[leaf_large['id']] = leaf_large
 
         # Both children need v_k regardless of what happens next: a
-        # child closed immediately below (Delta < tau_at_selection) is
-        # still a FINAL bin if it is never split again, and the
-        # V_win_hat gather at the end reuses this same cached value
-        # rather than recomputing it. One call prices both.
+        # child closed immediately below (two consecutive below-
+        # tolerance splits) is still a FINAL bin if it is never split
+        # again, and the V_win_hat gather at the end reuses this same
+        # cached value rather than recomputing it. One call prices
+        # both.
         batch_v([leaf_small, leaf_large])
 
-        if Delta < tau_at_selection:
+        if close_children:
             leaf_small['open'] = False
             leaf_large['open'] = False
         else:
