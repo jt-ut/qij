@@ -14,15 +14,16 @@ thousand, so a per-draw call to the interval functions is cheap and is
 the direct, unambiguous way to recompute "an interval at any level
 downstream without re-running anything" (`core/intervals.py`).
 
-A third interval, the second-order `core.intervals.qij2_interval`, is
-recomputed the same way from qij.parquet's `bin_mass_<o>`,
-`bin_influence_<o>` and `bin_d2T_<o>` list columns (`study.py`'s
-`_qij_row`) -- present only on a run written after that column was
-added. A run written before it has no such columns, and this module
-must still table it (backward compatibility): every qij2-derived
-column is then NaN (and any count column tied to it is 0), never
-raised, so an old run's table visibly shows the columns it predates
-rather than silently omitting them.
+The second-order QIJ interval (plan §34-35) was built, validated
+against §34's decision rule on the rev-7 products, and rejected: it
+lowered coverage on every coordinate at every level (plan §36.1,
+§36.2 ruling 6). It is removed from this module along with the
+`qij2_intervals_closed_form` it called. `qij.parquet`'s stored bin
+constituents (`bin_mass_<o>`, `bin_influence_<o>`, `bin_d2T_<o>`) stay
+in the product regardless -- they are the between-bin and bias terms'
+own inputs, not a second-order-only cost -- but nothing in this module
+reads them any more; a run that carries them merges in and tables the
+same as a run that does not, no special casing needed either way.
 
 Cost is normalized in three layers (plan section 8), kept apart by
 construction rather than by a note to remember: (1) evaluation counts
@@ -44,7 +45,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from qij.core.intervals import percentile_interval, qij2_interval, qij_interval
+from qij.core.intervals import percentile_interval, qij_interval
 
 __all__ = ["t1", "coverage_grid", "cost_table"]
 
@@ -81,8 +82,7 @@ def _outputs(truth_df):
 def _load_draws(estimator_dir, outputs):
     """Load and join truth.parquet, qij.parquet and boot.h5 for one
     (dataset, estimator) directory, aligned on `s` and on `outputs`'
-    order. No interval is read here -- see `_compute_intervals` and
-    `_compute_qij2_intervals`.
+    order. No interval is read here -- see `_compute_intervals`.
 
     `boot_n_failed` and `B` are boot.h5's per-draw failed-replicate
     count and its replicate count; `qij_n_failed` is qij.parquet's
@@ -90,40 +90,18 @@ def _load_draws(estimator_dir, outputs):
     estimator's outputs, as their products store them, and read here
     for T1's failure fractions (plan section 4's rare-support ruling).
 
-    `has_bin2` is whether this directory's qij.parquet carries the
-    `bin_mass_<o>`/`bin_influence_<o>`/`bin_d2T_<o>` list columns
-    (absent on a run written before they existed -- backward
-    compatibility, module docstring). When present, `bin_mass`,
-    `bin_influence` and `bin_d2T` are each `{output: [array_per_draw,
-    ...]}`, one variable-length array per draw -- not stacked into a
-    single array, since a draw's own final bin count `L` differs
-    across draws and across an estimator's outputs. `rows_total` is
-    read alongside `normalized_rows` only to recover each draw's data
-    size N for `qij2_interval`: `qij.py` writes `normalized_rows =
-    rows_by_stage['total'] / N`, so `rows_total / normalized_rows` is
-    N by construction, for every draw and every estimator, and no new
-    column is needed to carry N itself.
-
-    NOT `rows_total / evals_total`. That recovers N only if every
-    evaluation touches all N rows, and estimators do not: on the
-    Fundamental Plane the main run's median draw spends 541
-    evaluations over 476,012 rows -- 880 rows per evaluation against
-    N = 2000. N sets the multinomial's scale and hence the width of
-    the surrogate's sampling distribution, so an N understated 2.3-
-    fold would widen every second-order interval by roughly its
-    square root, with nothing in the output to say so."""
+    `qij.parquet` may also carry `bin_mass_<o>`/`bin_influence_<o>`/
+    `bin_d2T_<o>` list columns (the between-bin and bias terms' own
+    inputs, kept in the product regardless of what reads them, plan
+    §36.2 ruling 6) -- nothing here loads them; `truth.merge(qij_df)`
+    is indifferent to a source frame carrying extra columns, so a run
+    that has them and a run that does not table identically, with no
+    branch needed either way.
+    """
     estimator_dir = Path(estimator_dir)
     truth = pd.read_parquet(estimator_dir / "truth.parquet")
     qij_df = pd.read_parquet(estimator_dir / "qij.parquet")
     df = truth.merge(qij_df, on="s", how="inner")
-
-    has_bin2 = f"bin_mass_{outputs[0]}" in df.columns
-    if has_bin2:
-        bin_mass = {o: df[f"bin_mass_{o}"].tolist() for o in outputs}
-        bin_influence = {o: df[f"bin_influence_{o}"].tolist() for o in outputs}
-        bin_d2T = {o: df[f"bin_d2T_{o}"].tolist() for o in outputs}
-    else:
-        bin_mass = bin_influence = bin_d2T = None
 
     with h5py.File(estimator_dir / "boot.h5", "r") as h5f:
         theta_bootstrap = h5f["theta"][...]
@@ -158,12 +136,7 @@ def _load_draws(estimator_dir, outputs):
         "boot_n_failed": n_failed_bootstrap,
         "B": int(theta_bootstrap.shape[1]),
         "qij_n_failed": df["n_failed"].to_numpy(),
-        "rows_total": df["rows_total"].to_numpy(),
         "outputs": outputs,
-        "has_bin2": has_bin2,
-        "bin_mass": bin_mass,
-        "bin_influence": bin_influence,
-        "bin_d2T": bin_d2T,
     }
 
 
@@ -182,44 +155,6 @@ def _compute_intervals(loaded, level):
                                      loaded["a_bca"][i], level)
         bootstrap_lo_hi[i] = percentile_interval(loaded["theta_bootstrap"][i], level)
     return qij_lo_hi, bootstrap_lo_hi
-
-
-def _compute_qij2_intervals(loaded, level):
-    """The second-order QIJ interval at `level`, one row per draw, from
-    `core.intervals.qij2_interval` applied per (draw, output) -- unlike
-    `_compute_intervals`'s two interval, this cannot be one vectorized
-    call over `outputs` because each draw's own final bin count `L`
-    differs across draws and across an estimator's outputs (module
-    docstring). All-NaN, without calling `qij2_interval` at all, when
-    `loaded['has_bin2']` is False: an old run's table then shows NaN
-    here rather than raising (backward compatibility, module
-    docstring). `N` per draw is `rows_total / normalized_rows`
-    (`_load_draws` on why that recovers N exactly, and why the
-    evaluation count does not); a draw whose `normalized_rows` is 0
-    (should not happen, but is not assumed impossible) is left NaN
-    rather than dividing by zero. The seed is
-    the draw index `s` itself, so a given draw's second-order interval
-    is reproducible across a re-run of this table."""
-    theta_hat = loaded["theta_hat"]
-    n, q = theta_hat.shape
-    lo_hi = np.full((n, q, 2), np.nan)
-    if not loaded["has_bin2"]:
-        return lo_hi
-    outputs = loaded["outputs"]
-    for i in range(n):
-        norm_rows_i = loaded["normalized_rows"][i]
-        if not (norm_rows_i > 0):
-            continue
-        N_i = int(round(loaded["rows_total"][i] / norm_rows_i))
-        for j, o in enumerate(outputs):
-            lo_hi[i, j] = qij2_interval(
-                theta_hat[i, j],
-                loaded["bin_mass"][o][i],
-                loaded["bin_influence"][o][i],
-                loaded["bin_d2T"][o][i],
-                N_i, level, seed=int(loaded["s"][i]),
-            )
-    return lo_hi
 
 
 # ---------------------------------------------------------------------------
@@ -270,12 +205,12 @@ def t1(run_dir):
       Vhat_tot_V_tot_mc_{median,p05,p95}, Vhat_tot_V_oracle_{median,p05,p95},
       Vhat_tot_V_boot_{median,p05,p95},
       coverage_qij_0.95, coverage_qij_0.95_se,
-      coverage_qij2_0.95, coverage_qij2_0.95_se, width_ratio_qij2_0.95_median,
       coverage_bootstrap_0.95, coverage_bootstrap_0.95_se, n_coverage,
       width_ratio_0.95_median, L_median, evaluations_median,
       normalized_rows_median, wall_time_ratio_qij_over_bootstrap_median,
       bootstrap_replicate_failure_fraction, qij_evaluation_failure_fraction,
-      draw_failure_fraction, n_draws.
+      n_qij_failed, qij_failure_fraction,
+      draw_failure_fraction, n_draws, n_draws_excluded.
 
     V_tot has two sources, both reported (plan section 8): the true
     sampling variance Var_s(theta_hat) over the draws in
@@ -286,17 +221,7 @@ def t1(run_dir):
     draw. Coverage and width ratio are at the 0.95 level, recomputed
     from `qij_interval`/`percentile_interval`; coverage is pooled over
     draws within one (dataset, estimator, output) and carries its Monte
-    Carlo standard error sqrt(p(1-p)/n_coverage). The QIJ2 columns are
-    the same, at the same level, for the second-order interval
-    `core.intervals.qij2_interval` (`_compute_qij2_intervals`) --
-    placed right after the first-order QIJ coverage columns so the row
-    reads first-order, then second-order, then bootstrap;
-    `width_ratio_qij2_0.95_median` is QIJ2 width over bootstrap width,
-    the same convention as `width_ratio_0.95_median`'s QIJ-over-
-    bootstrap. All three are NaN (0.95_se included) on a run written
-    before `qij.parquet` carried the bin constituents
-    (`loaded['has_bin2']` False, module docstring) -- not omitted, so
-    the gap is visible in the table itself. Wall time is reported
+    Carlo standard error sqrt(p(1-p)/n_coverage). Wall time is reported
     only as the ratio QIJ/bootstrap within the same draw on the same
     worker (cost layer 2, plan section 8) -- never an absolute
     duration. L is per output (`L_<output>`): the refinement reaches a
@@ -307,6 +232,60 @@ def t1(run_dir):
     across an estimator's output rows -- the product's own structure,
     not a table artefact.
 
+    FAILURE ACCOUNTING (plan §36.1, §36.2 ruling 5 -- the rev-7
+    coverage-exclusion audit and the ruling it produced). The rev-7
+    products showed draws vanishing from coverage that no existing
+    column counted: the IMF lost 31 of 1000 draws from coverage while
+    `n_draws_excluded` (below) reported 17, and MVT's nu lost 3 while
+    `n_draws_excluded` reported 0. The gap was two further, distinct
+    causes -- a failed initial-bin evaluation, and a stage-1 collapse
+    (the influence model's constant path, or a refinement that never
+    splits) that leaves `a_bca` undefined (`0/0` in
+    `core.outputs.acceleration`) even though `theta_hat` and
+    `V_tot_hat` are both finite -- neither of which is a full-data box
+    hit and neither of which touches `theta_hat`, so the old test
+    (`theta_hat` NaN) never saw them.
+
+    `n_qij_failed` and `qij_failure_fraction` close that gap directly,
+    per output, by testing the thing coverage actually depends on
+    rather than a proxy for it: a draw counts as QIJ-failed here
+    exactly when `qij_interval`'s own `[lo, hi]` is non-finite for that
+    output -- i.e. exactly the draws `cov_qij` (below) already marks
+    NaN, whatever combination of `theta_hat`, `V_tot_hat` or `a_bca`
+    produced it. This is deliberately the same test regardless of which
+    of the two product shapes on disk produced the non-finite interval:
+    a run written before the collapsed-stage-1 fix stores a collapsed
+    draw as `L = 1`, `V_btw = V_win_hat = V_tot_hat = B_hat = 0.0`,
+    `a_bca = NaN` (finite variance, undefined acceleration, still a
+    non-finite interval through the BCa adjustment); a run written
+    after it stores `V_btw`/`V_tot_hat`/`a_bca` all NaN directly (plan
+    §36.2 ruling 4). Both collapse into the same NaN `[lo, hi]`, so
+    testing the interval -- not `L == 1 and V_btw == 0`, which would
+    only catch the first shape, or `V_tot_hat` alone, which would miss
+    the pre-fix shape's finite zero -- counts both without a
+    product-shape branch and without double-counting a draw that is
+    NaN by both routes at once (there is only one route once the
+    interval itself is the test).
+
+    Because `n_qij_failed` is built from the exact same finiteness
+    mask `cov_qij` uses, the reconciliation is an identity, not an
+    empirical coincidence: `n_coverage = n_draws - n_qij_failed`
+    equals `n_qij` (`_coverage_se(cov_qij[:, j])`'s own valid count) by
+    construction, for every row, on both product shapes. This
+    superseded the previous `min(n_qij, n_bootstrap)`: across every
+    directory audited (plan §36.1) the bootstrap side never lost a
+    whole draw (`n_bootstrap == n_draws` always, `percentile_interval`
+    needs every one of a draw's replicates to fail before it returns
+    NaN), so the two formulas agree everywhere they have been checked
+    -- but `min(...)` only holds `n_draws - n_qij_failed == n_coverage`
+    because of that empirical fact, not because the arithmetic forces
+    it, and the ruling asks for the identity to hold by construction.
+    If a future run does lose whole draws on the bootstrap side, that
+    shows up in `bootstrap_replicate_failure_fraction` (below,
+    unchanged) as a nonzero rate with no corresponding `n_qij_failed`
+    count -- worth checking `n_bootstrap` directly at that point, since
+    `n_coverage` here is QIJ-side only.
+
     The rare-support ruling (plan section 4) requires both methods'
     failure fractions to be visible rather than silently absorbed:
     `bootstrap_replicate_failure_fraction` is the share of that
@@ -315,15 +294,65 @@ def t1(run_dir):
     draws); `qij_evaluation_failure_fraction` is the share of QIJ
     evaluations that failed (qij.parquet's per-draw `n_failed` against
     `evals_total`, the evaluations that draw spent, pooled over
-    draws); `draw_failure_fraction` is, per output, the share of draws
-    excluded entirely because the full-data fit failed -- `theta_hat`
-    NaN in truth.parquet. These three are distinct: the first two
-    share both methods' per-replicate/per-evaluation failures within
-    the draws that were run at all, the third counts draws dropped
-    before either method could run on them. A failed draw's NaN
-    `theta_hat` already falls out of `v_tot_mc` (`np.nanvar` above),
-    so it is excluded from the truth product's variance without
-    special-casing here.
+    draws) -- a noisy, pooled proxy for QIJ-side draw loss, not a count
+    of it (plan §36.1: it is exactly 0.0 for MVT's nu despite 3 draws
+    lost, since those 3 draws fail no evaluation at all, only the
+    refinement's own decision to never split); `draw_failure_fraction`
+    is, per output, the share of draws excluded entirely because the
+    full-data fit failed -- `theta_hat` NaN in truth.parquet. These are
+    distinct measurements at different stages: the replicate/evaluation
+    fractions describe failures within draws that were run at all,
+    `draw_failure_fraction`/`n_draws_excluded` count draws whose
+    full-data fit never produced a usable `theta_hat`, and
+    `n_qij_failed`/`qij_failure_fraction` count draws whose QIJ RESULT
+    -- the interval coverage tests -- came back NaN regardless of cause.
+    A failed draw's NaN `theta_hat` already falls out of `v_tot_mc`
+    (`np.nanvar` above), so it is excluded from the truth product's
+    variance without special-casing here.
+
+    `n_draws_excluded` is `draw_failure_fraction`'s raw count and is
+    UNCHANGED by this ruling -- it stays exactly what it measured
+    before (plan §36.2 ruling 5's "second column"): the number of this
+    (dataset, estimator, output)'s draws whose `theta_hat` is NaN in
+    truth.parquet, i.e. the full-data box-rule count. It is kept
+    alongside `n_qij_failed` specifically so both causes of lost
+    coverage stay visible and distinguishable: `n_draws_excluded` is
+    the full-data fit's own failure (theta_hat undefined, so nothing
+    downstream of it is even attempted meaningfully), `n_qij_failed`
+    is every draw QIJ's own construction could not turn into an
+    interval, which is a strict superset whenever the two causes
+    differ (plan §36.1: on the IMF, 17 of the 31 are box hits, the
+    other 14 are QIJ-side; a box hit's NaN `theta_hat` also NaNs the
+    interval, since `qij_interval` adds `adj*se` to `theta_hat`
+    itself, so `n_qij_failed >= n_draws_excluded` always, never less).
+    Per plan section 4, a fit resting on an active parameter-box bound
+    is not a stationary point, so its influence is not defined there
+    either; the estimator, never this table, is what applies the rule
+    -- a bound hit already comes back as NaN `theta_hat` (and,
+    following from it, NaN in every column this table derives from
+    that draw), so testing `theta_hat` here only counts what the
+    estimator already decided.
+
+    It is named for what it MEASURES, not for what produces it. The
+    test is "this draw has no usable full-data fit", and a fit at the
+    box is one cause among several: a non-converged optimizer and a
+    failed continuity solve return NaN by the same route. Since the
+    IMF optimizer was given its exact gradient and Hessian those other
+    causes measure 0.0% (the S=1000 run at N=2000), so in practice the
+    count IS the box-rule count and the paper may report it as such --
+    but that is an empirical fact about the current fitter, not a
+    property of this column, and it should be re-checked rather than
+    assumed if the count and the box-hit count ever disagree.
+
+    A zero here on a run built BEFORE the box tolerance was corrected
+    (commit afbf169) means only that the old tolerance, `eta*(1+|b|)`,
+    was too tight to catch a fit parked 1e-4 from its bound -- not
+    that no draw reached the box. The S=1000 run at 36ce72a reports 0
+    while seventeen of its draws sit at p = 20 to within 2e-4.
+    It is 0 for every closed-form and vector closed-form estimator
+    (Pareto, MVT, FP), which never return NaN, and only the IMF rows
+    (the one estimator with an active box, plan section 4) can be
+    nonzero. Placed as T1's final column per the spec.
     """
     rows = []
     for dataset, estimator, estimator_dir in _product_dirs(run_dir):
@@ -331,7 +360,6 @@ def t1(run_dir):
         outputs = _outputs(truth)
         loaded = _load_draws(estimator_dir, outputs)
         qij_lo_hi, bootstrap_lo_hi = _compute_intervals(loaded, T1_LEVEL)
-        qij2_lo_hi = _compute_qij2_intervals(loaded, T1_LEVEL)
 
         v_tot_mc = np.nanvar(loaded["theta_hat"], axis=0, ddof=1)          # (q,)
         v_boot = np.nanvar(loaded["theta_bootstrap"], axis=1, ddof=1)      # (n, q)
@@ -347,27 +375,41 @@ def t1(run_dir):
             r_tot_oracle = np.full_like(r_tot_mc, np.nan)
 
         cov_qij = _covered(loaded["theta_true"], qij_lo_hi)
-        cov_qij2 = _covered(loaded["theta_true"], qij2_lo_hi)
         cov_bootstrap = _covered(loaded["theta_true"], bootstrap_lo_hi)
 
         width_qij = qij_lo_hi[..., 1] - qij_lo_hi[..., 0]
-        width_qij2 = qij2_lo_hi[..., 1] - qij2_lo_hi[..., 0]
         width_bootstrap = bootstrap_lo_hi[..., 1] - bootstrap_lo_hi[..., 0]
         width_ratio = _safe_ratio(width_qij, width_bootstrap)
-        width_ratio_qij2 = _safe_ratio(width_qij2, width_bootstrap)
 
         wall_time_ratio = _safe_ratio(loaded["wall_time_qij"], loaded["wall_time_bootstrap"])
 
         n_draws = len(loaded["s"])
+        # nansum, not sum: boot_n_failed/qij_n_failed/evaluations are
+        # int-valued counts and stay finite even on a box-hit draw (the
+        # estimator still ran and was still counted, module docstring),
+        # but a plain sum is one NaN away from silently taking every
+        # draw's failure fraction to NaN -- nansum costs nothing today
+        # and keeps this column from being the one place in t1 that
+        # isn't NaN-aware if that ever changes upstream.
         bootstrap_replicate_failure_fraction = float(_safe_ratio(
-            np.sum(loaded["boot_n_failed"]), float(loaded["B"] * n_draws)))
+            np.nansum(loaded["boot_n_failed"]), float(loaded["B"] * n_draws)))
         qij_evaluation_failure_fraction = float(_safe_ratio(
-            np.sum(loaded["qij_n_failed"]), np.sum(loaded["evaluations"])))
+            np.nansum(loaded["qij_n_failed"]), np.nansum(loaded["evaluations"])))
 
         for j, output in enumerate(outputs):
             p_qij, se_qij, n_qij = _coverage_se(cov_qij[:, j])
-            p_qij2, se_qij2, _n_qij2 = _coverage_se(cov_qij2[:, j])
-            p_bootstrap, se_bootstrap, n_bootstrap = _coverage_se(cov_bootstrap[:, j])
+            # n_bootstrap not used below (module docstring: n_coverage
+            # is QIJ-side only, plan §36.2 ruling 5) -- se_bootstrap
+            # above is already computed from cov_bootstrap's own valid
+            # entries, so the bootstrap side's own sample size is
+            # already correctly reflected in its own se without it.
+            p_bootstrap, se_bootstrap, _n_bootstrap = _coverage_se(cov_bootstrap[:, j])
+            # Plan §36.2 ruling 5: every draw whose QIJ interval is
+            # non-finite for this output, whatever produced it -- the
+            # same mask `cov_qij[:, j]`'s own NaNs already carry, so
+            # `n_qij_failed` and `n_qij` (above) partition `n_draws`
+            # exactly, by construction, not by checking it separately.
+            n_qij_failed = n_draws - n_qij
             rows.append({
                 "dataset": dataset, "estimator": estimator, "output": output,
                 "V_btw_V_tot_mc_median": np.nanmedian(r_btw_mc[:, j]),
@@ -387,12 +429,13 @@ def t1(run_dir):
                 "Vhat_tot_V_boot_p95": np.nanpercentile(r_tot_boot[:, j], 95),
                 "coverage_qij_0.95": p_qij,
                 "coverage_qij_0.95_se": se_qij,
-                "coverage_qij2_0.95": p_qij2,
-                "coverage_qij2_0.95_se": se_qij2,
-                "width_ratio_qij2_0.95_median": np.nanmedian(width_ratio_qij2[:, j]),
                 "coverage_bootstrap_0.95": p_bootstrap,
                 "coverage_bootstrap_0.95_se": se_bootstrap,
-                "n_coverage": min(n_qij, n_bootstrap),
+                # By construction (see docstring): n_qij_failed is
+                # n_draws - n_qij, so this is exactly n_qij -- never a
+                # min() against the bootstrap side, which is tracked in
+                # its own right through bootstrap_replicate_failure_fraction.
+                "n_coverage": n_draws - n_qij_failed,
                 "width_ratio_0.95_median": np.nanmedian(width_ratio[:, j]),
                 "L_median": np.nanmedian(loaded["L"][:, j]),
                 "evaluations_median": np.nanmedian(loaded["evaluations"]),
@@ -400,8 +443,11 @@ def t1(run_dir):
                 "wall_time_ratio_qij_over_bootstrap_median": np.nanmedian(wall_time_ratio),
                 "bootstrap_replicate_failure_fraction": bootstrap_replicate_failure_fraction,
                 "qij_evaluation_failure_fraction": qij_evaluation_failure_fraction,
+                "n_qij_failed": int(n_qij_failed),
+                "qij_failure_fraction": float(n_qij_failed) / n_draws if n_draws else float("nan"),
                 "draw_failure_fraction": float(np.mean(np.isnan(loaded["theta_hat"][:, j]))),
                 "n_draws": n_draws,
+                "n_draws_excluded": int(np.sum(np.isnan(loaded["theta_hat"][:, j]))),
             })
     return pd.DataFrame(rows)
 
@@ -415,16 +461,11 @@ def coverage_grid(run_dir):
     The coverage grid for the calibration panel F2(b): empirical
     against nominal coverage over the config's levels (`levels` in
     `<run_dir>/config.yaml`, plan section 3 -- not hardcoded), for the
-    QIJ, the second-order QIJ2 and the bootstrap percentile interval,
-    pooled across every (dataset, estimator, output, draw) coordinate.
-    One row per level: `level, coverage_qij, coverage_qij_se, n_qij,
-    coverage_qij2, coverage_qij2_se, coverage_bootstrap,
+    QIJ and the bootstrap percentile interval, pooled across every
+    (dataset, estimator, output, draw) coordinate. One row per level:
+    `level, coverage_qij, coverage_qij_se, n_qij, coverage_bootstrap,
     coverage_bootstrap_se, n_bootstrap`, the standard errors
-    sqrt(p(1-p)/n). `coverage_qij2`/`coverage_qij2_se` are NaN at every
-    level on a run written before `qij.parquet` carried the bin
-    constituents (`loaded['has_bin2']` False, module docstring) -- the
-    pooled indicator is then all-NaN, which `_coverage_se` already
-    turns into (nan, nan, 0) with no special-casing needed here.
+    sqrt(p(1-p)/n).
     """
     run_dir = Path(run_dir)
     config = yaml.safe_load((run_dir / "config.yaml").read_text())
@@ -439,21 +480,16 @@ def coverage_grid(run_dir):
     rows = []
     for level in levels:
         pooled_qij = []
-        pooled_qij2 = []
         pooled_bootstrap = []
         for loaded in loaded_by_dir:
             qij_lo_hi, bootstrap_lo_hi = _compute_intervals(loaded, level)
-            qij2_lo_hi = _compute_qij2_intervals(loaded, level)
             pooled_qij.append(_covered(loaded["theta_true"], qij_lo_hi).ravel())
-            pooled_qij2.append(_covered(loaded["theta_true"], qij2_lo_hi).ravel())
             pooled_bootstrap.append(_covered(loaded["theta_true"], bootstrap_lo_hi).ravel())
         p_qij, se_qij, n_qij = _coverage_se(np.concatenate(pooled_qij))
-        p_qij2, se_qij2, _n_qij2 = _coverage_se(np.concatenate(pooled_qij2))
         p_bootstrap, se_bootstrap, n_bootstrap = _coverage_se(np.concatenate(pooled_bootstrap))
         rows.append({
             "level": level,
             "coverage_qij": p_qij, "coverage_qij_se": se_qij, "n_qij": n_qij,
-            "coverage_qij2": p_qij2, "coverage_qij2_se": se_qij2,
             "coverage_bootstrap": p_bootstrap, "coverage_bootstrap_se": se_bootstrap,
             "n_bootstrap": n_bootstrap,
         })

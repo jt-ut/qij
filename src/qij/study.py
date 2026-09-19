@@ -192,7 +192,7 @@ def _qij_row(s: int, outputs, res) -> dict:
     bin influence U_k) and `bin_d2T` (that bin's uncentered second
     difference), i.e. the constituents of a quadratic surrogate of the
     estimator in the bin masses. They cost kilobytes per draw and let
-    `core.intervals.qij2_interval` recompute a second-order interval
+    `core.intervals.qij2_intervals_closed_form` recompute a second-order interval
     downstream, at any level, with NO further estimator evaluations --
     the same spirit as this module's other products, where no interval
     is ever stored (`core/intervals.py`'s module docstring)."""

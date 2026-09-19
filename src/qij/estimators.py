@@ -78,6 +78,36 @@ def _weighted_quantile(x: np.ndarray, w: np.ndarray, q: float) -> float:
 
 
 # ======================================================================
+# Box rule (revision plan Sec 36.2(3), generalizing the IMF-only form of
+# plan Sec 4): a fit that runs to a bound is not a stationary point of its
+# objective, so neither the fit nor its influence means anything there --
+# the evaluation is a counted failure (NaN), never a silent number. Every
+# bounded estimator below applies this ONE test so the tolerance
+# convention cannot drift between them.
+# ======================================================================
+
+# Tolerance as a fraction of the box's own WIDTH, not of eta -- see
+# commit afbf169 ("The box test is a fraction of the box width, not of
+# eta"): eta measures how precisely the objective is evaluated, not how
+# close to an active bound a search actually parks, and those are
+# different scales.
+_BOX_TOL = 1e-4
+
+
+def _at_bound(value: float, lo: float, hi: float, tol: float = _BOX_TOL) -> bool:
+    """True when `value` lies within `tol` of the WIDTH of [lo, hi] of
+    either end. Apply this to whatever coordinate a fit's own search
+    actually walks in -- e.g. log(nu) for `mvt_nu`'s cap, since that is
+    the variable its root-find brackets and extends; alpha/Mstar/p
+    directly for the IMF, since `trust-constr` bounds those three
+    directly. The box rule is about resting on the search's own boundary,
+    not about a fixed unit that may not match it."""
+    width = hi - lo
+    tol_abs = tol * width
+    return abs(value - lo) <= tol_abs or abs(value - hi) <= tol_abs
+
+
+# ======================================================================
 # Weighted mean
 # ======================================================================
 
@@ -206,7 +236,12 @@ def mvt_nu(X: np.ndarray, w: np.ndarray) -> np.ndarray:
     Brackets [_MVT_NU_LO, _MVT_NU_HI] in log(nu), extending geometrically to
     [_MVT_NU_MIN, _MVT_NU_MAX] when the nominal bracket does not contain a
     root; a one-signed score over the whole admissible range returns the
-    appropriate cap rather than failing.
+    appropriate cap rather than failing -- unless that cap, or a root
+    found arbitrarily close to it, rests on the box (box rule, revision
+    plan Sec 36.2(3)), in which case the fit is a counted failure like any
+    other, not a silent 1e6. Tested in log(nu), the coordinate this
+    root-find actually brackets and extends in, so the tolerance is the
+    same fraction of the same box the search itself sees.
     """
     try:
         d = X.shape[1]
@@ -229,12 +264,14 @@ def mvt_nu(X: np.ndarray, w: np.ndarray) -> np.ndarray:
             s_lo = score_log(log_lo)
 
         if s_lo * s_hi > 0.0:
-            nu_hat = _MVT_NU_MAX if s_hi < 0.0 else _MVT_NU_MIN
+            log_nu_hat = log_nu_max if s_hi < 0.0 else log_nu_min
         else:
             log_nu_hat = optimize.brentq(score_log, log_lo, log_hi, xtol=eta)
-            nu_hat = float(np.exp(log_nu_hat))
+        nu_hat = float(np.exp(log_nu_hat))
 
         if not np.isfinite(nu_hat):
+            return np.full(1, np.nan)
+        if _at_bound(log_nu_hat, log_nu_min, log_nu_max):
             return np.full(1, np.nan)
         return np.array([nu_hat])
     except Exception:
@@ -591,19 +628,16 @@ class IMF:
         self.tau = float(tau)
         self.bounds = tuple((float(lo), float(hi)) for lo, hi in bounds)
 
-    # How close to an end of its own interval a parameter has to sit to
-    # count as resting on it, as a fraction of that interval's width.
-    _BOX_TOL = 1e-4
-
     def _at_box(self, params: np.ndarray) -> bool:
         """True when any of the three free (alpha, Mstar, p) parameters
-        lies within `_BOX_TOL` of its own interval's WIDTH of either end.
-        A fit that runs to a bound is not a stationary point of the
-        objective (the weighted score there is not zero), so it is not a
-        root of anything and neither the fit nor its influence means
-        anything there (plan Sec 4 ruling): the box stays, but the
-        evaluation becomes a counted failure like any other, not a silent
-        number.
+        lies within `_BOX_TOL` (module-level: the box rule, applied the
+        same way by every bounded estimator in this file) of its own
+        interval's WIDTH of either end. A fit that runs to a bound is not
+        a stationary point of the objective (the weighted score there is
+        not zero), so it is not a root of anything and neither the fit
+        nor its influence means anything there (plan Sec 4 ruling, plan
+        Sec 36.2(3)): the box stays, but the evaluation becomes a counted
+        failure like any other, not a silent number.
 
         The tolerance is a fraction of the box width, not `eta`. It was
         `eta * (1 + |bound|)` -- the estimator's own declared accuracy --
@@ -611,20 +645,16 @@ class IMF:
         objective is evaluated, not how close to an active bound the
         optimizer actually parks. On the S=1000 main run seventeen IMF
         draws ran p to its upper bound of 20 and stopped between 4.8e-5
-        and 2.0e-4 short of it, against a tolerance of 2.1e-5. The guard
-        caught none of them, so seventeen fits that rest on the
-        constraint were scored as ordinary draws, with QIJ reporting a
-        variance of 3e-8 (correctly: at an active bound the fit is
-        locally constant in the data weights, so the influence vanishes)
-        and an interval of essentially no width that misses with
-        certainty. 1e-4 of the width is 2.0e-3 on p, which catches all
-        seventeen with four orders of magnitude to spare before the
+        and 2.0e-4 short of it, against a tolerance of 2.1e-5 (commit
+        afbf169). The guard caught none of them, so seventeen fits that
+        rest on the constraint were scored as ordinary draws, with QIJ
+        reporting a variance of 3e-8 (correctly: at an active bound the
+        fit is locally constant in the data weights, so the influence
+        vanishes) and an interval of essentially no width that misses
+        with certainty. 1e-4 of the width is 2.0e-3 on p, which catches
+        all seventeen with four orders of magnitude to spare before the
         nearest interior fit."""
-        for v, (lo, hi) in zip(params, self.bounds):
-            tol = self._BOX_TOL * (hi - lo)
-            if abs(v - lo) <= tol or abs(v - hi) <= tol:
-                return True
-        return False
+        return any(_at_bound(v, lo, hi) for v, (lo, hi) in zip(params, self.bounds))
 
     def _moment_start(self, m_hi: np.ndarray, w_hi: np.ndarray,
                        masses: np.ndarray, w: np.ndarray) -> np.ndarray:

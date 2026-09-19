@@ -1,71 +1,118 @@
 """
-The paper's figures (plan section 8): F2, F3, F7, F9, F10. Every figure
-here is a pure function of the products written by `qij.study` under
-`<run_dir>/<dataset>/<estimator>/` (plan section 3, pinned exactly in
-the interface sheet section 5, amended 18 September for per-output
-refinement diagnostics) -- `truth.parquet`, `qij.parquet`, `boot.h5`,
-and, where an analytic influence exists, `qij_partition.parquet` and
-`qij_points.parquet`. Nothing else is read: no estimator is re-run, no
-dataset is redrawn, no interval is read (none is stored -- every
-interval here is recomputed from `core.intervals.qij_interval` or
-`core.intervals.percentile_interval`, exactly as `qij.tables` does).
+The paper's figures (`QIJ_figure_spec_final.md`, 19 September 2026): Figure
+A (accuracy, replaces F2), Figure B (refined influence against the truth,
+replaces F3 and F9), Figure C (cost, replaces F7), Figure D (cost against
+sample size, was F10, design unchanged, now with an optional IMF sweep
+pair). Every figure here is a pure function of the products `qij.study`
+writes under `<run_dir>/<dataset>/<estimator>/` -- `truth.parquet`,
+`qij.parquet`, `boot.h5`, `qij_points.parquet`, `qij_prototypes.parquet` --
+and, for Figure C, the separate timing run's own products. Nothing else is
+read: no estimator is re-run, no dataset is redrawn, no interval is read
+(none is stored -- every interval here is recomputed from
+`core.intervals.qij_interval` or `core.intervals.percentile_interval`).
+QIJ's second-order interval was built, checked against plan §34's decision
+rule on the rev-7 products and rejected there (it lowered coverage on
+every coordinate at every level, plan §36.1, §36.2 ruling 6); this module
+never carried a way to plot it, and now there is only ever one QIJ
+interval to plot, so no figure here takes an `interval` parameter or
+names one in a corner annotation.
 
-F2(b)'s coverage grid is read from `qij.tables.coverage_grid`, not
-recomputed here: the plan (section 8) names that table as the source
-"the coverage grid for F2(b)", so reusing it is the one way to compute
-it rather than a second copy of the same pooling logic.
+One coordinate set, one grid (spec, 19 September). Every figure that shows
+more than one estimand shows exactly these six, in exactly these
+positions, taken from the spec's table:
 
-Product directories are discovered under `<run_dir>/*/*/truth.parquet`
-(the same glob `qij.tables._product_dirs` uses), not hard-coded by
-name, so a figure draws exactly the estimands a run actually produced.
-The one exception is F9's curve panel, which the figure specification
-names explicitly ("the Pareto shape's psi_hat_0 curve"): that panel
-reads `pareto/shape` by path.
+    (1,1) MVT nu           (1,2) MVT P_tail        (1,3) FP a
+    (2,1) FP scatter        (2,2) IMF slope          (2,3) IMF p
 
-Two gaps the pinned products do not cover, noted here rather than
-worked around:
+Pareto, FP b/c and the IMF's M*/gamma_shape/gamma_scale appear only in
+Table T1 (`tables.py`), never in these four figures -- `_COORDS` below is
+this file's one definition of the six, and every figure iterates it rather
+than discovering estimands from the run directory the way the old F2/F3/F7
+did (plan section 12: one way to do each thing).
 
-* F9's curve panel was specified with an overlay of the prototype
-  influences I_j. No product carries per-prototype influence values
-  (`qij_points.parquet` is per-point, `qij.parquet`'s diagnostics are
-  scalar per draw/output) -- that overlay is not drawn here.
-* `qij_points.parquet` carries no draw index `s`, so its designated
-  draw cannot be joined back to that draw's `rho` in `qij.parquet`;
-  the corner annotation uses the rank correlation between psi0 and psi
-  (computable from qij_points.parquet alone) instead of rho.
+THE AXIS FOR FIGURE B, and why it comes from `qij_prototypes.parquet` and
+not `qij_points.parquet`. The spec's table gives, for each coordinate, "the
+axis for the influence figure": radius in whitened coordinates for MVT
+(no single native coordinate is meaningful for an elliptically symmetric
+draw), log sigma -- data coordinate 0 -- for FP, log stellar mass for IMF;
+in every case the value plotted is the MEAN OVER THE PROTOTYPE'S RECEPTIVE
+FIELD, because the true influence of an empirical estimator is not defined
+AT a single point, let alone at a prototype that may not itself be a data
+point. `qij_points.parquet` carries no per-point data-space coordinate at
+all (`study.py`'s `_points_frame`: `s, i, bmu`, then per output `psi0,
+psi, sigma, psi_hat, bin_label`) -- there is no column to group by `bmu`
+and average, which is what the interface notes for this task describe.
+What IS available, and turns out to be exactly the quantity needed: `w_0,
+w_1, ...` in `qij_prototypes.parquet`, "the prototype's position in T's
+own native coordinates" (`qij.py`: `W_X = inverse(xvq.centers)`). Because
+`fit_xvq`'s prototypes are k-means centroids -- the mean, in the
+quantizer's own coordinates, of exactly the points in that receptive field
+-- and because every `inverse` this package ever uses (`mvt_vq_transform`,
+or the identity for every other dataset) is affine, `inverse` commutes
+with the receptive-field mean: `w_j` IS ALREADY `mean_{i in RF_j}
+(native coordinates of x_i)`, not merely a point somewhere near it. So for
+FP (whose native coordinate 0 already IS log sigma, `datasets._fp_pool`'s
+`[log_sigma, log_I_e, log_R_half]`) and for IMF (`log10` of `w_0`, the
+receptive field's mean raw mass -- see the note below), `w_j` supplies the
+spec's axis exactly, with no further computation needed at all.
 
-F10 reads the cost-vs-N study, which writes one (dataset, estimator)
-pair's products per `N<size>` subdirectory (`study.py`'s multi-N
-layout); no product records N itself, so `fig10` takes an explicit
-`{N: product_dir}` mapping from its caller -- each value already the
-directory holding that N's `truth.parquet`, `qij.parquet` and
-`boot.h5` -- rather than discovering N from a directory-naming
-convention this file would have to invent.
+For MVT this is only a PROXY, and that is flagged in the function
+docstrings and in this task's own report rather than worked around
+silently: the spec wants radius in the 𝒳-VQ's WHITENED coordinates, but
+`qij_prototypes.parquet` stores only the NATIVE-coordinate `w_j` --
+`xvq.centers`, the actual whitened centroids `fit_xvq` computed, are never
+written to any product, and the per-draw mean/std `mvt_vq_transform` used
+to whiten are not recoverable downstream without redrawing the dataset
+(which this module, like its predecessor, refuses to do). What this file
+plots instead is the Euclidean norm of the NATIVE `w_j`. For this
+particular dataset that is a reasonable proxy -- the multivariate t drawn
+here is exchangeable across its 10 coordinates with population mean 0 and
+one common per-coordinate variance, so `mvt_vq_transform`'s empirical
+per-coordinate standardization is, in expectation, close to a single
+scalar rescaling that would not change the ORDER of prototypes along the
+radius axis, only its units -- but it is not what the spec literally asks
+for, and a future revision that wants the exact quantity should have
+`study.py` write `xvq.centers` into `qij_prototypes.parquet` alongside
+`w_*`.
+
+For IMF, `log10(w_0)` is `log10` of the receptive field's mean LINEAR
+mass, not the mean of the receptive field's LOG mass -- the two differ by
+Jensen's inequality, and the gap is the same structural point as MVT's:
+the 𝒳-VQ clusters IMF draws on raw mass (no `vq_transform` is registered
+for `imf`, `study.py`'s `_VQ_TRANSFORM` table), so the only receptive-field
+mean available downstream is a mean in linear space. Log is applied to
+that mean afterward, purely as this axis's display unit.
+
+BOX-RULE EXCLUSION is not reimplemented here. The IMF estimator returns
+NaN for a fit resting on its box, and that NaN already propagates through
+`theta_hat`, `V_tot_hat`, the bootstrap replicates and the bin
+constituents in `truth.parquet`/`qij.parquet`/`boot.h5`; every statistic
+in this file is computed with `np.nanmedian`/`np.nanpercentile`/
+`np.nanvar(ddof=...)` or an explicit `np.isfinite` mask, so a box-rule draw
+drops out of every figure's numbers on its own.
 """
 
 from __future__ import annotations
 
-import glob
 import os
-import string
 
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib.gridspec import GridSpec
 from matplotlib.lines import Line2D
 from scipy.stats import spearmanr
 
 from qij.core.intervals import percentile_interval, qij_interval
-from qij.tables import coverage_grid
 
-__all__ = ["fig2", "fig3", "fig7", "fig9", "fig10"]
+__all__ = ["fig_a", "fig_b", "fig_c", "fig_d"]
 
 # ---------------------------------------------------------------------------
 # Style (QIJ_figure_style.md, inlined -- this task's only files are
-# figures.py and scripts/make_figures.py, so there is no separate
-# style module).
+# figures.py and scripts/make_figures.py, so there is no separate style
+# module). Palette and rcParams unchanged from the module this replaces;
+# the LNCS sizes below are the ones fixed in the style guide's section 8 on
+# 19 September, verified against the revision's own llncs.cls.
 # ---------------------------------------------------------------------------
 
 OI = dict(black="#000000", orange="#E69F00", skyblue="#56B4E9",
@@ -78,12 +125,14 @@ METHOD = {
     "truth": dict(color=OI["black"], ls=":", marker=None, label="Truth"),
 }
 BAND = dict(materiality="#DDDDDD")
+SECONDARY = "#444444"   # a neutral third hue for a twin-axis quantity that
+                         # is itself a ratio (wall time, width) rather than
+                         # a second method -- never confused with QIJ/boot.
 
-# 4-hue qualitative palette for F10(c), the one panel that must encode
-# TWO categorical axes (output and method) at once, so colour cannot
-# stay reserved for method alone there; method keeps its own
-# linestyle/marker (solid o = QIJ, dashed s = bootstrap) as the second
-# cue in that panel.
+# 4-hue qualitative palette for the panels that must encode a per-output
+# categorical axis at once (Figure D's coverage panels): method keeps its
+# own linestyle/marker (solid o = QIJ, dashed s = bootstrap) as the second
+# cue there, same convention as the module this replaces used for F10(c).
 OUTPUT_COLORS = [OI["orange"], OI["green"], OI["purple"], OI["skyblue"],
                   OI["yellow"], OI["black"]]
 
@@ -112,13 +161,49 @@ RC_LNCS = {
     "savefig.bbox": None, "savefig.transparent": False,
 }
 
+# Final LNCS sizes (style guide section 8, 19 September, verified against
+# the revision's llncs.cls: text width 347.12pt = 4.80in). Draft sizes
+# (lncs=False) are larger only so a screen render is legible while
+# iterating; they carry no meaning for the paper and are never placed in
+# the tex.
+FIGSIZE_A_LNCS = (4.80, 2.20)
+FIGSIZE_A_DRAFT = (12.0, 5.0)
+FIGSIZE_B_LNCS = (4.80, 3.00)
+FIGSIZE_B_DRAFT = (12.0, 7.0)
+FIGSIZE_C_LNCS = (4.80, 3.00)
+FIGSIZE_C_DRAFT = (12.0, 7.0)
+FIGSIZE_D1_LNCS = (4.80, 2.20)     # 1x2: FP only
+FIGSIZE_D1_DRAFT = (11.0, 4.4)
+FIGSIZE_D2_LNCS = (4.80, 3.60)     # 2x2: FP row + IMF sweep row
+FIGSIZE_D2_DRAFT = (11.0, 8.0)
+
+# `plt.rcParams` has no real "annotation.fontsize" key -- the module this
+# replaces called `plt.rcParams.get("annotation.fontsize", 9)` for its
+# corner text, which silently always returned the hardcoded default
+# because that key does not exist and `dict.get` does not validate it, so
+# every corner annotation rendered at 9pt even in LNCS mode, ignoring the
+# style guide's "annotation: 7pt at final size" row. Fixed here with a
+# real module-level switch that `_use_style` sets.
+_STATE = {"annotation_fontsize": 9}
+
 
 def _use_style(lncs: bool) -> None:
     plt.rcParams.update(RC_LNCS if lncs else RC)
+    _STATE["annotation_fontsize"] = 7 if lncs else 9
 
 
-def _panel_label(ax, text: str) -> None:
-    ax.text(-0.12, 1.04, text, transform=ax.transAxes,
+def _panel_label(ax, text: str, dy: float = 1.16, dx: float = -0.13) -> None:
+    """`dy` (axes-fraction) is a parameter, not a constant, because the
+    same absolute clearance above a panel's title means a very different
+    RELATIVE offset depending on how tall that panel's own axes are: a
+    2x3 grid's row is a fraction of the figure a 1x3 row is not, so a
+    `dy` generous enough to clear a wide, centred title in a narrow 2x3
+    panel (Figures B, C) would push the label off the TOP of a 1x3
+    figure (Figure A, which has no title to clear in the first place).
+    `dx` is likewise tuned per grid: a centred title's rendered width is
+    a much bigger share of a narrow panel's own width, so how far left
+    the label has to sit to clear it differs the same way."""
+    ax.text(dx, dy, text, transform=ax.transAxes,
             fontsize=plt.rcParams["axes.titlesize"], fontweight="bold",
             va="top", ha="left")
 
@@ -130,42 +215,74 @@ def _legend(ax_or_fig, title=None, **kw):
     return leg
 
 
-def _panel_labels(n: int) -> list:
-    return [f"({c})" for c in string.ascii_lowercase[:n]]
+# ---------------------------------------------------------------------------
+# The six coordinates, fixed by the spec's table -- every figure iterates
+# this list and nothing else discovers an estimand.
+# ---------------------------------------------------------------------------
+
+_COORDS = [
+    dict(dataset="mvt", estimator="nu", output="nu",
+         label=r"MVT $\nu$", axis="radius", row=0, col=0),
+    dict(dataset="mvt", estimator="tail", output="P_tail",
+         label=r"MVT $P_\mathrm{tail}$", axis="radius", row=0, col=1),
+    dict(dataset="fp", estimator="fp", output="a",
+         label=r"FP $a$", axis="logsigma", row=0, col=2),
+    dict(dataset="fp", estimator="fp", output="scatter",
+         label="FP scatter", axis="logsigma", row=1, col=0),
+    dict(dataset="imf", estimator="imf", output="slope",
+         label="IMF slope", axis="logmass", row=1, col=1),
+    dict(dataset="imf", estimator="imf", output="p",
+         label=r"IMF $p$", axis="logmass", row=1, col=2),
+]
+
+_AXIS_LABEL = {
+    "radius": r"radius $\|x\|$",
+    "logsigma": r"$\log\sigma$",
+    "logmass": r"$\log_{10}$ mass",
+}
+
+_LEVEL = 0.95   # every figure's one coverage/width level (spec: "at 0.95")
 
 
 # ---------------------------------------------------------------------------
-# Reading the products -- mirrors `qij.tables`'s own loading helpers
-# (same glob, same "theta_hat_" discovery of output names, same s-based
-# join), amended for the per-output refinement diagnostics.
+# Reading the products
 # ---------------------------------------------------------------------------
 
-def _product_dirs(run_dir: str) -> list:
-    """(dataset, estimator, path) for every `<run_dir>/<dataset>/
-    <estimator>/` directory with a `truth.parquet` (plan section 3),
-    discovered from the directories themselves."""
-    dirs = []
-    for truth_path in sorted(glob.glob(os.path.join(run_dir, "*", "*", "truth.parquet"))):
-        estimator_dir = os.path.dirname(truth_path)
-        dataset = os.path.basename(os.path.dirname(estimator_dir))
-        estimator = os.path.basename(estimator_dir)
-        dirs.append((dataset, estimator, estimator_dir))
-    return dirs
+def _product_dir(run_dir: str, dataset: str, estimator: str) -> str:
+    """`<run_dir>/<dataset>/<estimator>`, checked rather than assumed to
+    exist -- `_COORDS` names datasets/estimators the spec fixed, not ones
+    discovered from what a particular run happened to write, so a run
+    missing one is a clear error here rather than a KeyError three calls
+    later."""
+    path = os.path.join(run_dir, dataset, estimator)
+    if not os.path.exists(os.path.join(path, "truth.parquet")):
+        raise FileNotFoundError(
+            f"no truth.parquet under {path} (dataset={dataset!r}, "
+            f"estimator={estimator!r}, needed by the spec's fixed six coordinates)"
+        )
+    return path
 
 
 def _outputs(truth_df: pd.DataFrame) -> list:
-    """The estimator's output names, off truth.parquet's own
-    `theta_hat_<output>` columns."""
     prefix = "theta_hat_"
     return [c[len(prefix):] for c in truth_df.columns if c.startswith(prefix)]
 
 
 def _load_draws(estimator_dir: str, outputs: list) -> dict:
-    """truth.parquet, qij.parquet and boot.h5 for one (dataset,
-    estimator) directory, joined on `s` and aligned to `outputs`'
-    order. `L` and the other refinement diagnostics are per-output
-    (amendment 3, 18 September) and are the only ones this dict needs
-    beyond the shared `normalized_rows`/`wall_time_total`."""
+    """truth.parquet, qij.parquet and boot.h5 for one (dataset, estimator)
+    directory, joined on `s` and aligned to `outputs`' order -- the same
+    shape `qij.tables._load_draws` builds, kept as this module's own copy
+    (plan section 12: each downstream module owns its own loader) but
+    without the oracle-influence columns tables.py also carries: no figure
+    in this file compares against V_oracle any more (Figure A(a) compares
+    against V_MC, the Monte-Carlo variance of theta_hat over draws, per
+    the 19 September spec), so there is nothing here to load it for.
+    `qij.parquet` may also carry `bin_mass_<o>`/`bin_influence_<o>`/
+    `bin_d2T_<o>` (the second-order interval's inputs, kept in the
+    product regardless of what reads them, plan §36.2 ruling 6) --
+    nothing here loads them, and the merge below is indifferent to a
+    source frame carrying extra columns, so a run that has them and a
+    run that does not load identically."""
     truth = pd.read_parquet(os.path.join(estimator_dir, "truth.parquet"))
     qij_df = pd.read_parquet(os.path.join(estimator_dir, "qij.parquet"))
     df = truth.merge(qij_df, on="s", how="inner")
@@ -174,6 +291,7 @@ def _load_draws(estimator_dir: str, outputs: list) -> dict:
         theta_boot = h5f["theta"][...]
         s_boot = h5f["s"][...]
         wall_time_boot = h5f["wall_time"][...]
+        n_failed_boot = h5f["n_failed"][...]
         boot_outputs = [o.decode() if isinstance(o, bytes) else str(o)
                          for o in h5f.attrs["outputs"]]
 
@@ -182,44 +300,98 @@ def _load_draws(estimator_dir: str, outputs: list) -> dict:
     col_order = [boot_outputs.index(o) for o in outputs]
     theta_boot = theta_boot[order][:, :, col_order]
     wall_time_boot = wall_time_boot[order]
+    n_failed_boot = n_failed_boot[order]
 
-    has_oracle = f"V_oracle_{outputs[0]}" in df.columns
-    return {
-        "s": df["s"].to_numpy(),
-        "theta_true": df[[f"theta_true_{o}" for o in outputs]].to_numpy(),
-        "theta_hat": df[[f"theta_hat_{o}" for o in outputs]].to_numpy(),
-        "v_tot_hat": df[[f"V_tot_hat_{o}" for o in outputs]].to_numpy(),
-        "a_bca": df[[f"a_bca_{o}" for o in outputs]].to_numpy(),
-        "v_oracle": (df[[f"V_oracle_{o}" for o in outputs]].to_numpy()
-                     if has_oracle else None),
-        "L": df[[f"L_{o}" for o in outputs]].to_numpy(),
-        "theta_boot": theta_boot,
-        "wall_time_qij": df["wall_time_total"].to_numpy(),
-        "wall_time_boot": wall_time_boot,
-        "normalized_rows": df["normalized_rows"].to_numpy(),
-        "has_oracle": has_oracle,
-    }
+    return dict(
+        s=df["s"].to_numpy(),
+        outputs=outputs,
+        theta_true=df[[f"theta_true_{o}" for o in outputs]].to_numpy(),
+        theta_hat=df[[f"theta_hat_{o}" for o in outputs]].to_numpy(),
+        v_tot_hat=df[[f"V_tot_hat_{o}" for o in outputs]].to_numpy(),
+        a_bca=df[[f"a_bca_{o}" for o in outputs]].to_numpy(),
+        theta_boot=theta_boot,
+        wall_time_qij=df["wall_time_total"].to_numpy(),
+        wall_time_boot=wall_time_boot,
+        n_failed_boot=n_failed_boot,
+        B=theta_boot.shape[1],
+        n_failed_qij=df["n_failed"].to_numpy(),
+        evals_total=df["evals_total"].to_numpy(),
+        normalized_rows=df["normalized_rows"].to_numpy(),
+    )
 
 
-def _estimands(run_dir: str, require_oracle: bool = False) -> list:
-    """One dict per (dataset, estimator, output) triple, in discovery
-    order. `require_oracle` keeps only outputs with a `V_oracle_<o>`
-    column -- F2(a)/(c), F3 and F9 all compare against the oracle
-    influence, so they only exist where plan section 4's analytic
-    influence exists."""
-    out = []
-    for dataset, estimator, path in _product_dirs(run_dir):
-        truth = pd.read_parquet(os.path.join(path, "truth.parquet"))
-        outputs = _outputs(truth)
-        has_oracle = f"V_oracle_{outputs[0]}" in truth.columns if outputs else False
-        if require_oracle and not has_oracle:
-            continue
-        for o in outputs:
-            label = (f"{dataset}/{estimator}" if len(outputs) == 1
-                      else f"{dataset}/{estimator}:{o}")
-            out.append(dict(dataset=dataset, estimator=estimator, output=o,
-                             dir=path, label=label))
-    return out
+# ---------------------------------------------------------------------------
+# The interval helper -- the one place [lo, hi] arrays get built for the
+# QIJ interval. Every figure that draws it calls this, never `qij_interval`
+# directly, so there is exactly one place doing the per-draw loop.
+# ---------------------------------------------------------------------------
+
+def _qij_lo_hi(loaded: dict, j: int, level: float) -> np.ndarray:
+    """(n, 2) [lo, hi] for output index `j`, over every draw in `loaded`,
+    at `level`, from `core.intervals.qij_interval`. A draw whose
+    `theta_hat`/`V_tot_hat`/`a_bca` is not all finite for this output
+    (a box-rule or QIJ-side failure, plan §36.2 ruling 5) is left NaN
+    rather than passed in -- `qij_interval` would produce NaN from it
+    anyway, but the finiteness check is made explicit here rather than
+    relied on implicitly."""
+    n = loaded["theta_hat"].shape[0]
+    lo_hi = np.full((n, 2), np.nan)
+    for i in range(n):
+        th, v, a = loaded["theta_hat"][i, j], loaded["v_tot_hat"][i, j], loaded["a_bca"][i, j]
+        if np.isfinite(th) and np.isfinite(v) and np.isfinite(a):
+            lo_hi[i] = qij_interval(np.array([th]), np.array([v]), np.array([a]), level)[0]
+    return lo_hi
+
+
+def _boot_lo_hi(loaded: dict, j: int, level: float, b: int = None) -> np.ndarray:
+    """(n, 2) [lo, hi], the bootstrap's percentile interval at `level` from
+    the first `b` replicates (all of them if `b` is None) -- the prefix
+    that gives Figure C's cost-against-replicates curve."""
+    n = loaded["theta_hat"].shape[0]
+    arr = loaded["theta_boot"][:, :b, j] if b is not None else loaded["theta_boot"][:, :, j]
+    lo_hi = np.full((n, 2), np.nan)
+    for i in range(n):
+        lo_hi[i] = percentile_interval(arr[i][:, None], level)[0]
+    return lo_hi
+
+
+def _coverage_se(theta_true: np.ndarray, lo_hi: np.ndarray) -> dict:
+    """Empirical coverage and its Monte Carlo SE sqrt(p(1-p)/n), over the
+    draws where both `theta_true` and the interval are finite (a failed
+    evaluation or a box-rule NaN is excluded, not counted as a miss)."""
+    lo, hi = lo_hi[:, 0], lo_hi[:, 1]
+    ok = np.isfinite(lo) & np.isfinite(hi) & np.isfinite(theta_true)
+    covered = (theta_true >= lo) & (theta_true <= hi)
+    ind = np.where(ok, covered.astype(float), np.nan)
+    valid = ind[np.isfinite(ind)]
+    n = int(valid.size)
+    if n == 0:
+        return dict(p=float("nan"), se=float("nan"), n=0)
+    p = float(valid.mean())
+    return dict(p=p, se=float(np.sqrt(p * (1.0 - p) / n)), n=n)
+
+
+def _coverage_pair(loaded: dict, j: int, level: float) -> tuple:
+    """(qij coverage dict, bootstrap coverage dict) at `level`, for output
+    index `j` -- the one call both Figure A(b) and Figure D's coverage
+    panels make."""
+    lo_hi_qij = _qij_lo_hi(loaded, j, level)
+    lo_hi_boot = _boot_lo_hi(loaded, j, level)
+    theta_true = loaded["theta_true"][:, j]
+    return _coverage_se(theta_true, lo_hi_qij), _coverage_se(theta_true, lo_hi_boot)
+
+
+def _width_ratio(loaded: dict, j: int, level: float) -> np.ndarray:
+    """(n,) QIJ/bootstrap interval width at `level`, per draw, NaN where
+    either interval failed."""
+    lo_hi_qij = _qij_lo_hi(loaded, j, level)
+    lo_hi_boot = _boot_lo_hi(loaded, j, level)
+    w_qij = lo_hi_qij[:, 1] - lo_hi_qij[:, 0]
+    w_boot = lo_hi_boot[:, 1] - lo_hi_boot[:, 0]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = w_qij / w_boot
+    bad = ~np.isfinite(w_boot) | (w_boot == 0)
+    return np.where(bad, np.nan, ratio)
 
 
 def _mean_se(x: np.ndarray) -> dict:
@@ -232,275 +404,330 @@ def _mean_se(x: np.ndarray) -> dict:
     return dict(mean=mean, se=se)
 
 
+def _stat(x: np.ndarray) -> dict:
+    """NaN-aware median/p25/p75 -- box-rule and failed-evaluation NaNs
+    drop out on their own (module docstring)."""
+    x = np.asarray(x, dtype=float)
+    x = x[np.isfinite(x)]
+    if x.size == 0:
+        return dict(median=float("nan"), p25=float("nan"), p75=float("nan"))
+    return dict(median=float(np.median(x)), p25=float(np.percentile(x, 25)),
+                p75=float(np.percentile(x, 75)))
+
+
 # ---------------------------------------------------------------------------
-# F2 -- the validation trio
+# Figure A -- accuracy (replaces F2): three panels, six rows each.
 # ---------------------------------------------------------------------------
 
-def _f2_panel_a_rows(oracle_estimands: list) -> list:
-    """Two mean-log-ratio series per estimand, both against the
-    per-draw oracle variance V_oracle_<o>: QIJ's log(V_tot_hat/V_oracle)
-    and the bootstrap's log(V_boot/V_oracle), V_boot the per-draw
-    variance of boot.h5's replicates (a numpy computation on the
-    product's own array, not a re-run), over the replicates that
-    converged -- a NaN replicate (plan section 4: a resample that drops
-    the rare support) is excluded, not treated as a value; the failure
-    fractions themselves are T1's, not this panel's."""
-    rows = []
-    for e in oracle_estimands:
-        loaded = _load_draws(e["dir"], [e["output"]])
-        v_oracle = loaded["v_oracle"][:, 0]
-        v_tot_hat = loaded["v_tot_hat"][:, 0]
-        ok = np.isfinite(v_oracle) & (v_oracle > 0) & np.isfinite(v_tot_hat) & (v_tot_hat > 0)
-        log_qij = np.log(v_tot_hat[ok] / v_oracle[ok])
-
-        v_boot = np.nanvar(loaded["theta_boot"][:, :, 0], axis=1, ddof=1)
-        okb = np.isfinite(v_oracle) & (v_oracle > 0) & np.isfinite(v_boot) & (v_boot > 0)
-        log_boot = np.log(v_boot[okb] / v_oracle[okb])
-
-        rows.append(dict(label=e["label"], qij=_mean_se(log_qij), boot=_mean_se(log_boot)))
-    return rows
-
-
-def _plot_f2_a(ax, rows: list) -> None:
+def _row_panel(ax, rows: list, key_fn, xlabel: str, ref_line, band, xlim,
+               panel_lbl: str, show_labels: bool) -> None:
+    """The one dot-and-whisker layout Figure A's three panels share: a
+    horizontal reference (`ref_line`, e.g. 0, 1.0 or the nominal level),
+    an optional shaded tolerance band, and two dodged markers (QIJ above,
+    bootstrap below its row) with asymmetric or symmetric whiskers from
+    `key_fn`. `key_fn(row, method)` returns `(center, lo_err, hi_err)`."""
     n = len(rows)
     y = np.arange(n)
     ms = plt.rcParams["lines.markersize"]
-    dodge = 0.15
-    ax.axvspan(-0.05, 0.05, color=BAND["materiality"], zorder=0)
-    ax.axvline(0, color=METHOD["truth"]["color"], ls=":", lw=1.0, zorder=1)
+    dodge = 0.16
+    if band is not None:
+        ax.axvspan(band[0], band[1], color=BAND["materiality"], zorder=0)
+    ax.axvline(ref_line, color=METHOD["truth"]["color"], ls=":", lw=1.0, zorder=1)
     for key, dy in (("qij", -dodge), ("boot", dodge)):
         kw = METHOD[key]
-        mu = np.array([r[key]["mean"] for r in rows])
-        se = np.array([r[key]["se"] for r in rows])
-        xerr = np.where(np.isfinite(se), 1.96 * se, 0.0)
-        ax.errorbar(mu, y + dy, xerr=xerr, fmt=kw["marker"], color=kw["color"],
-                    ms=ms, capsize=3, zorder=2, label=kw["label"])
+        c, lo_e, hi_e = key_fn(rows, key)
+        xerr = np.vstack([lo_e, hi_e])
+        ax.errorbar(c, y + dy, xerr=xerr, fmt=kw["marker"], color=kw["color"],
+                    ms=ms, capsize=2.5, lw=plt.rcParams["lines.linewidth"] * 0.7,
+                    zorder=2, label=kw["label"])
     ax.set_yticks(y)
-    ax.set_yticklabels([r["label"] for r in rows])
-    ax.set_xlabel(r"Mean $\log(\hat V_\mathrm{tot}/V_\mathrm{tot})$")
+    if show_labels:
+        ax.set_yticklabels([r["label"] for r in rows])
+    else:
+        ax.set_yticklabels([])
+    ax.set_xlabel(xlabel, labelpad=2)
+    if xlim is not None:
+        ax.set_xlim(*xlim)
+    # Four x-ticks, not matplotlib's default ~6-7: at 2.20in total height
+    # split three ways, a fifth or sixth label collides with its neighbour
+    # or clips at the panel's own right edge (both observed before this
+    # was added).
+    ax.xaxis.set_major_locator(plt.MaxNLocator(4))
     ax.invert_yaxis()
-    _panel_label(ax, "(a)")
+    _panel_label(ax, panel_lbl)
 
 
-def _plot_f2_b(ax, grid: pd.DataFrame) -> None:
-    lw = plt.rcParams["lines.linewidth"]
-    levels = grid["level"].to_numpy(dtype=float)
-    band_lo = levels - 1.96 * grid["coverage_qij_se"].to_numpy(dtype=float)
-    band_hi = levels + 1.96 * grid["coverage_qij_se"].to_numpy(dtype=float)
-    ax.fill_between(levels, band_lo, band_hi, color=BAND["materiality"], zorder=0)
-    ax.plot([0.49, 1.0], [0.49, 1.0], color=METHOD["truth"]["color"], ls=":", lw=1.0, zorder=1)
-    ax.plot(levels, grid["coverage_qij"], color=METHOD["qij"]["color"], ls=METHOD["qij"]["ls"],
-            marker=METHOD["qij"]["marker"], lw=lw, label=METHOD["qij"]["label"])
-    ax.plot(levels, grid["coverage_bootstrap"], color=METHOD["boot"]["color"], ls=METHOD["boot"]["ls"],
-            marker=METHOD["boot"]["marker"], lw=lw, label=METHOD["boot"]["label"])
-    ax.set_xlabel("Nominal coverage")
-    ax.set_ylabel("Empirical coverage")
-    ax.set_xlim(0.49, 1.0)
-    ax.set_ylim(0.49, 1.0)
-    _panel_label(ax, "(b)")
+def _a_rows(run_dir: str) -> tuple:
+    """One pass over the six fixed coordinates, building the three
+    panels' rows together so `_load_draws` runs once per coordinate."""
+    rows_a, rows_b, rows_c = [], [], []
+    for c in _COORDS:
+        path = _product_dir(run_dir, c["dataset"], c["estimator"])
+        truth = pd.read_parquet(os.path.join(path, "truth.parquet"))
+        outputs = _outputs(truth)
+        j = outputs.index(c["output"])
+        loaded = _load_draws(path, outputs)
+
+        # (a) V_MC: the Monte-Carlo variance of theta_hat over the draws in
+        # the truth product (spec: replaces the old oracle-based ratio, so
+        # this panel needs no analytic influence and exists for every
+        # coordinate). nanvar excludes box-rule/failed draws by itself.
+        theta_hat_j = loaded["theta_hat"][:, j]
+        v_mc = float(np.nanvar(theta_hat_j, ddof=1))
+        v_boot = np.nanvar(loaded["theta_boot"][:, :, j], axis=1, ddof=1)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            log_qij = np.log(loaded["v_tot_hat"][:, j] / v_mc)
+            log_boot = np.log(v_boot / v_mc)
+        rows_a.append(dict(label=c["label"], qij=_mean_se(log_qij), boot=_mean_se(log_boot)))
+
+        # (b) coverage at 0.95
+        cov_qij, cov_boot = _coverage_pair(loaded, j, _LEVEL)
+        rows_b.append(dict(label=c["label"], qij=cov_qij, boot=cov_boot))
+
+        # (c) width ratio QIJ/bootstrap at 0.95, median with 5-95% whiskers
+        ratio = _width_ratio(loaded, j, _LEVEL)
+        ratio = ratio[np.isfinite(ratio)]
+        if ratio.size:
+            rows_c.append(dict(label=c["label"], median=float(np.median(ratio)),
+                                p05=float(np.percentile(ratio, 5)),
+                                p95=float(np.percentile(ratio, 95))))
+        else:
+            rows_c.append(dict(label=c["label"], median=float("nan"),
+                                p05=float("nan"), p95=float("nan")))
+    return rows_a, rows_b, rows_c
 
 
-def _f2_panel_c_rows(oracle_estimands: list, level: float = 0.95) -> list:
-    """Width ratio QIJ/bootstrap at `level`, mean over draws, per
-    estimand -- recomputed from `core.intervals`, never read."""
-    rows = []
-    for e in oracle_estimands:
-        loaded = _load_draws(e["dir"], [e["output"]])
-        n = loaded["theta_hat"].shape[0]
-        widths_qij, widths_boot = [], []
-        for i in range(n):
-            th, v, a = loaded["theta_hat"][i], loaded["v_tot_hat"][i], loaded["a_bca"][i]
-            if np.isfinite(th).all() and np.isfinite(v).all() and np.isfinite(a).all():
-                lo, hi = qij_interval(th, v, a, level)[0]
-                if np.isfinite(lo) and np.isfinite(hi):
-                    widths_qij.append(hi - lo)
-            lo_b, hi_b = percentile_interval(loaded["theta_boot"][i], level)[0]
-            if np.isfinite(lo_b) and np.isfinite(hi_b):
-                widths_boot.append(hi_b - lo_b)
-        mw_qij = float(np.mean(widths_qij)) if widths_qij else float("nan")
-        mw_boot = float(np.mean(widths_boot)) if widths_boot else float("nan")
-        ratio = mw_qij / mw_boot if (np.isfinite(mw_boot) and mw_boot != 0) else float("nan")
-        rows.append(dict(label=e["label"], ratio=ratio))
-    return rows
+def fig_a(run_dir: str, lncs: bool = False) -> plt.Figure:
+    """Figure A -- accuracy (spec section "Figure A"). Three panels side by
+    side, the six fixed coordinates as rows in each, reading down in the
+    spec table's order: MVT nu, MVT P_tail, FP a, FP scatter, IMF slope,
+    IMF p.
 
+    (a) log(V_hat_tot/V_MC) [QIJ] and log(V_boot/V_MC) [bootstrap], V_MC
+    the Monte-Carlo variance of theta_hat over draws (NOT the oracle
+    variance -- the 19 September spec's own change from the module this
+    replaces); mean over draws with 95% whiskers, +/-0.05 materiality band.
+    Caption note for the IMF p row (not rendered here, this is prose for
+    the tex): V_MC there is inflated by interior fits far out on the
+    ridge, so that row's coverage and width (panels b, c) are the
+    informative numbers, not panel (a).
+    (b) coverage of both intervals at 0.95, MC-SE whiskers, nominal line.
+    (c) width ratio QIJ/bootstrap at 0.95, median with 5-95% whiskers,
+    +/-10% band, unity line.
 
-def _plot_f2_c(ax, rows: list) -> None:
-    n = len(rows)
-    y = np.arange(n)
-    ms = plt.rcParams["lines.markersize"]
-    ax.axvspan(0.90, 1.10, color=BAND["materiality"], zorder=0)
-    ax.axvline(1.0, color=METHOD["truth"]["color"], ls=":", lw=1.0, zorder=1)
-    ratios = np.array([r["ratio"] for r in rows])
-    finite = np.isfinite(ratios)
-    ax.scatter(ratios[finite], y[finite], color=METHOD["qij"]["color"], s=ms ** 2, zorder=2)
-    ax.set_yticks(y)
-    ax.set_yticklabels([r["label"] for r in rows])
-    ax.set_xlabel("Width ratio (QIJ / bootstrap)")
-    ax.invert_yaxis()
-    _panel_label(ax, "(c)")
-
-
-def fig2(run_dir: str, lncs: bool = False) -> plt.Figure:
-    """F2 -- the validation trio (a) paired log-variance ratio against
-    the oracle, (b) coverage calibration pooled over every estimand
-    (from `qij.tables.coverage_grid`), (c) width ratio at 0.95. Panels
-    (a)/(c) are restricted to estimands with an analytic influence
-    (plan section 4); panel (b) pools over every discovered estimand."""
+    Row labels are drawn once, on panel (a), and omitted from (b)/(c) --
+    repeating six labels three times each does not fit in 2.20in of
+    height and adds nothing panel (a) did not already say.
+    """
     _use_style(lncs)
-    figsize = (4.80, 2.45) if lncs else (13.0, 5.0)
-
-    oracle_estimands = _estimands(run_dir, require_oracle=True)
-    if not oracle_estimands:
-        raise FileNotFoundError(f"no oracle-influence estimands found under {run_dir}")
-    grid = coverage_grid(run_dir)
+    figsize = FIGSIZE_A_LNCS if lncs else FIGSIZE_A_DRAFT
+    rows_a, rows_b, rows_c = _a_rows(run_dir)
 
     fig, axes = plt.subplots(1, 3, figsize=figsize, constrained_layout=False)
-    _plot_f2_a(axes[0], _f2_panel_a_rows(oracle_estimands))
-    _plot_f2_b(axes[1], grid)
-    _plot_f2_c(axes[2], _f2_panel_c_rows(oracle_estimands))
+
+    def key_a(rows, method):
+        c = np.array([r[method]["mean"] for r in rows])
+        se = np.array([r[method]["se"] for r in rows])
+        e = np.where(np.isfinite(se), 1.96 * se, 0.0)
+        return c, e, e
+
+    _row_panel(axes[0], rows_a, key_a, r"$\log(\hat V_\mathrm{tot}/V_\mathrm{MC})$",
+               ref_line=0.0, band=(-0.05, 0.05), xlim=None, panel_lbl="(a)", show_labels=True)
+
+    def key_b(rows, method):
+        c = np.array([r[method]["p"] for r in rows])
+        se = np.array([r[method]["se"] for r in rows])
+        e = np.where(np.isfinite(se), 1.96 * se, 0.0)
+        return c, e, e
+
+    _row_panel(axes[1], rows_b, key_b, "Coverage",
+               ref_line=_LEVEL, band=None, xlim=(0.45, 1.02), panel_lbl="(b)", show_labels=False)
+
+    def key_c(rows, method):
+        # width ratio has only one series (QIJ/bootstrap is already a
+        # comparison), plotted at the "qij" dodge slot; the "boot" slot is
+        # empty so `_row_panel`'s shared two-marker loop still works.
+        if method == "boot":
+            nan = np.full(len(rows), np.nan)
+            return nan, nan, nan
+        c = np.array([r["median"] for r in rows])
+        lo = c - np.array([r["p05"] for r in rows])
+        hi = np.array([r["p95"] for r in rows]) - c
+        return c, lo, hi
+
+    _row_panel(axes[2], rows_c, key_c, "Width ratio",
+               ref_line=1.0, band=(0.90, 1.10), xlim=None, panel_lbl="(c)", show_labels=False)
+    # Panel (c) plots one series (the ratio already compares the two
+    # methods); its "boot" errorbar call above drew nothing (all-NaN), so
+    # nothing further is needed here -- the figure-level legend below
+    # still correctly labels panels (a)/(b), which do have both series.
 
     if lncs:
-        fig.subplots_adjust(left=0.16, right=0.985, top=0.92, bottom=0.40, wspace=0.75)
+        fig.subplots_adjust(left=0.20, right=0.965, top=0.88, bottom=0.32, wspace=0.55)
     else:
-        fig.subplots_adjust(left=0.08, right=0.99, top=0.92, bottom=0.30, wspace=0.55)
+        fig.subplots_adjust(left=0.14, right=0.97, top=0.92, bottom=0.24, wspace=0.45)
 
-    handles = [Line2D([], [], color=METHOD[k]["color"], ls=METHOD[k]["ls"],
+    handles = [Line2D([], [], color=METHOD[k]["color"], ls="none",
                        marker=METHOD[k]["marker"], label=METHOD[k]["label"])
                for k in ("qij", "boot")]
-    fig.legend(handles=handles, loc="lower center", ncol=2)
+    fig.legend(handles=handles, loc="lower center", ncol=2,
+               fontsize=plt.rcParams["legend.fontsize"])
     return fig
 
 
 # ---------------------------------------------------------------------------
-# F3 -- partition-size curves
+# Figure B -- the refined influence against the truth (replaces F3, F9)
 # ---------------------------------------------------------------------------
 
-M_GRID = [4, 6, 8, 12, 16, 24, 32, 48, 64]   # plan section 5, pinned exactly
-
-_F3_SERIES = ["xvq", "ivq_psi0", "ivq_true"]
-_F3_COLOR = {"xvq": OI["green"], "ivq_psi0": METHOD["qij"]["color"], "ivq_true": METHOD["truth"]["color"]}
-_F3_LS = {"xvq": "-", "ivq_psi0": "-", "ivq_true": ":"}
-_F3_MARKER = {"xvq": "s", "ivq_psi0": "o", "ivq_true": None}
-_F3_LABEL = {
-    "xvq": r"$\mathcal{X}$-VQ, $M$ receptive fields",
-    "ivq_psi0": r"$\mathcal{I}$-VQ, $M$ bins from $\hat\psi_0$",
-    "ivq_true": r"$\mathcal{I}$-VQ, $M$ bins from the true $\psi$ (ceiling)",
-}
-_F3_PIPELINE_LABEL = r"QIJ after refinement ($L$ bins)"
-_F3_COLUMN = {"xvq": "xvq", "ivq_psi0": "ivq_psi0", "ivq_true": "ivq_true"}
-
-
-def _f3_partition_summary(part: pd.DataFrame, output: str) -> dict:
-    out = {}
-    for series in _F3_SERIES:
-        col = f"{_F3_COLUMN[series]}_{output}"
-        med, p25, p75 = [], [], []
-        for M in M_GRID:
-            v = part.loc[part["M"] == M, col].to_numpy(dtype=float)
-            v = v[np.isfinite(v)]
-            if v.size:
-                med.append(np.median(v)); p25.append(np.percentile(v, 25)); p75.append(np.percentile(v, 75))
-            else:
-                med.append(np.nan); p25.append(np.nan); p75.append(np.nan)
-        out[series] = dict(median=np.array(med), p25=np.array(p25), p75=np.array(p75))
-    return out
+def _b_axis(protos: pd.DataFrame, axis_kind: str) -> np.ndarray:
+    """The panel's data axis, one value per prototype, already the
+    receptive-field mean (module docstring: `w_j` IS that mean, by
+    construction, for every dataset this package has). `radius` uses every
+    `w_*` column (MVT is 10-dimensional); `logsigma` and `logmass` use
+    `w_0` alone, the spec's "data coordinate 0"."""
+    if axis_kind == "radius":
+        w_cols = sorted((c for c in protos.columns if c.startswith("w_")),
+                         key=lambda c: int(c.split("_")[1]))
+        W = protos[w_cols].to_numpy(dtype=float)
+        return np.sqrt(np.sum(W ** 2, axis=1))
+    if axis_kind == "logsigma":
+        return protos["w_0"].to_numpy(dtype=float)
+    if axis_kind == "logmass":
+        return np.log10(protos["w_0"].to_numpy(dtype=float))
+    raise ValueError(axis_kind)
 
 
-def _f3_pipeline_marker(dir_path: str, output: str) -> tuple:
-    """Median final bin count L_<output> and the median captured share
-    V_btw_<output>/V_oracle_<output> the pipeline achieved, over all of
-    a dir's production draws (not just the 200-draw partition grid)."""
-    loaded = _load_draws(dir_path, [output])
-    L = loaded["L"][:, 0]
-    v_btw = pd.read_parquet(os.path.join(dir_path, "qij.parquet")).merge(
-        pd.read_parquet(os.path.join(dir_path, "truth.parquet"))[["s", f"V_oracle_{output}"]],
-        on="s", how="inner",
-    )
-    share = v_btw[f"V_btw_{output}"].to_numpy(dtype=float) / v_btw[f"V_oracle_{output}"].to_numpy(dtype=float)
-    L = L[np.isfinite(L)]
-    share = share[np.isfinite(share)]
-    L_med = float(np.median(L)) if L.size else float("nan")
-    share_med = float(np.median(share)) if share.size else float("nan")
-    return L_med, share_med
+def _b_series(pts: pd.DataFrame, protos: pd.DataFrame, output: str) -> tuple:
+    """The two y-series, one point per prototype: the true influence and
+    the refined estimate, each averaged over that prototype's receptive
+    field (`qij_points.parquet` grouped by `bmu`), reindexed to
+    `qij_prototypes.parquet`'s own prototype order `j` so a panel's x
+    (from `_b_axis`) and y arrays line up index-for-index."""
+    g = pts.groupby("bmu")[[f"psi_{output}", f"psi_hat_{output}"]].mean()
+    g = g.reindex(protos["j"].to_numpy())
+    return (g[f"psi_{output}"].to_numpy(dtype=float),
+            g[f"psi_hat_{output}"].to_numpy(dtype=float))
 
 
-def _plot_f3_panel(ax, summary: dict, L_med: float, share_med: float, title: str) -> None:
-    lw = plt.rcParams["lines.linewidth"]
-    ms = plt.rcParams["lines.markersize"]
-    M = np.array(M_GRID, dtype=float)
-    for series in _F3_SERIES:
-        d = summary[series]
-        finite = np.isfinite(d["median"])
-        if not np.any(finite):
-            continue
-        ax.fill_between(M[finite], d["p25"][finite], d["p75"][finite],
-                         color=_F3_COLOR[series], alpha=0.18, linewidth=0, zorder=1)
-        ax.plot(M[finite], d["median"][finite], color=_F3_COLOR[series],
-                ls=_F3_LS[series], marker=_F3_MARKER[series], ms=ms, lw=lw,
-                zorder=2, label=_F3_LABEL[series])
-    if np.isfinite(L_med):
-        ax.axvline(L_med, color="#999999", ls=":", lw=1.0, alpha=0.7, zorder=0)
-        if np.isfinite(share_med):
-            ax.scatter([L_med], [share_med], marker="*", s=(ms * 2.4) ** 2,
-                       color=METHOD["qij"]["color"], edgecolors="black", linewidths=0.5,
-                       zorder=5, label=_F3_PIPELINE_LABEL)
-    ax.set_xlim(0, M_GRID[-1] * 1.08)
-    ax.set_ylim(0.0, 1.0)
+def _plot_b_panel(ax, x, y_true, y_hat, mass, rho, title, xlabel, panel_lbl) -> None:
+    finite = np.isfinite(x) & np.isfinite(y_true) & np.isfinite(y_hat)
+    x, y_true, y_hat, mass = x[finite], y_true[finite], y_hat[finite], mass[finite]
+    ms2 = plt.rcParams["lines.markersize"] ** 2
+    size = ms2 * (0.6 + 8.0 * mass) if mass.size else ms2  # RF mass, optional per spec
+
+    ax.scatter(x, y_true, s=size, facecolors="none", edgecolors=METHOD["truth"]["color"],
+               linewidths=0.8, zorder=2, label="True $\\psi$ (RF mean)")
+    ax.scatter(x, y_hat, s=size, facecolors=METHOD["qij"]["color"], edgecolors="none",
+               alpha=0.85, zorder=3, label=r"$\hat\psi$ (RF mean)")
     ax.set_title(title)
+    ax.set_xlabel(xlabel, labelpad=2)
+    # No per-panel "Influence" ylabel -- fig_b sets it once with
+    # `fig.supylabel`; six repeats of the same word cost horizontal room
+    # this grid does not have (2x3 panels at ~1.1in wide each).
+    _panel_label(ax, panel_lbl, dy=1.34)
+
+    fs = _STATE["annotation_fontsize"]
+    if y_true.size >= 2 and np.std(y_true) > 0 and np.std(y_hat) > 0:
+        rs = float(spearmanr(y_true, y_hat).correlation)
+        rho_text = f"{rho:.3f}" if np.isfinite(rho) else "n/a"
+        text = f"$r_s={rs:.3f}$\n$\\rho={rho_text}$"
+    else:
+        text = "$r_s$ undefined"
+    ax.text(0.04, 0.96, text, transform=ax.transAxes, ha="left", va="top", fontsize=fs)
 
 
-def fig3(run_dir: str, lncs: bool = False) -> plt.Figure:
-    """F3 -- captured share V_btw/V_tot vs partition size M, one panel
-    per estimand with an analytic influence (`qij_partition.parquet`).
-    x axis is LINEAR (the 18 September ruling), labelled "partition
-    size M"."""
+def fig_b(run_dir: str, lncs: bool = False) -> plt.Figure:
+    """Figure B -- the refined influence against the truth (spec section
+    "Figure B", replaces F3 and F9). 2x3 panels at the spec's fixed grid
+    positions. Each panel: one point per prototype of the designated
+    draw's X-VQ; x the receptive-field mean of the panel's data axis
+    (`_b_axis`, from `qij_prototypes.parquet`); y two series, the true
+    influence (hollow marker) and the refined estimate psi_hat (filled
+    marker), both receptive-field means (`_b_series`, from
+    `qij_points.parquet`); marker area proportional to receptive-field
+    mass; corner text the Spearman rank correlation between the two
+    series and rho (`qij.parquet`'s `rho_<output>` for the designated
+    draw). No interval is drawn here, so this figure takes no `interval`
+    parameter.
+
+    Backward compatibility: a run written before `qij_points.parquet`
+    carried `psi_hat_<output>`/`bmu`/`bin_label_<output>` raises a single
+    clear sentence naming the run and the missing column, not a pandas
+    KeyError three lines into `_b_series`.
+    """
     _use_style(lncs)
-    estimands = _estimands(run_dir, require_oracle=True)
-    n = len(estimands)
-    if n == 0:
-        raise FileNotFoundError(f"no qij_partition.parquet estimands found under {run_dir}")
-    n_cols = min(n, 4)
-    n_rows = -(-n // n_cols)
-    figsize = (4.80, 1.7 * n_rows + 0.7) if lncs else (4.0 * n_cols, 3.4 * n_rows)
+    figsize = FIGSIZE_B_LNCS if lncs else FIGSIZE_B_DRAFT
+    fig, axes = plt.subplots(2, 3, figsize=figsize, constrained_layout=False)
 
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, squeeze=False)
-    axes_flat = axes.ravel()
-    for ax, e, lbl in zip(axes_flat, estimands, _panel_labels(n)):
-        part = pd.read_parquet(os.path.join(e["dir"], "qij_partition.parquet"))
-        summary = _f3_partition_summary(part, e["output"])
-        L_med, share_med = _f3_pipeline_marker(e["dir"], e["output"])
-        _plot_f3_panel(ax, summary, L_med, share_med, e["label"])
-        _panel_label(ax, lbl)
-    for ax in axes_flat[n:]:
-        ax.set_visible(False)
+    for c in _COORDS:
+        path = _product_dir(run_dir, c["dataset"], c["estimator"])
+        o = c["output"]
+        pts = pd.read_parquet(os.path.join(path, "qij_points.parquet"))
+        required = ["bmu", f"psi_hat_{o}", f"psi_{o}"]
+        missing = [col for col in required if col not in pts.columns]
+        if missing:
+            raise ValueError(
+                f"qij_points.parquet at {path} is missing column(s) {missing} -- "
+                f"this run of {c['dataset']}/{c['estimator']} predates QIJ's "
+                f"refined-influence points product (psi_hat_<output>, bmu, "
+                f"bin_label_<output>); rerun the study to regenerate it before "
+                f"rendering Figure B."
+            )
+        protos = pd.read_parquet(os.path.join(path, "qij_prototypes.parquet"))
+        x = _b_axis(protos, c["axis"])
+        y_true, y_hat = _b_series(pts, protos, o)
+        mass = protos["p"].to_numpy(dtype=float)
 
-    fig.supxlabel("Partition size $M$", fontweight="bold")
-    fig.supylabel(r"$V_\mathrm{btw}/V_\mathrm{tot}$", fontweight="bold")
+        # rho (the FD-to-prediction scale, glossary) for the designated
+        # draw alone -- qij_points.parquet's own `s` column names which
+        # draw that is, so no separate "designated draw" constant is
+        # needed here.
+        rho_col = f"rho_{o}"
+        rho = float("nan")
+        qij_full = pd.read_parquet(os.path.join(path, "qij.parquet"))
+        if rho_col in qij_full.columns:
+            designated_s = int(pts["s"].iloc[0])
+            match = qij_full.loc[qij_full["s"] == designated_s, rho_col]
+            if len(match):
+                rho = float(match.iloc[0])
 
-    handles_by_label = {}
-    for ax in axes_flat[:n]:
-        hs, ls_ = ax.get_legend_handles_labels()
-        for h, l in zip(hs, ls_):
-            handles_by_label.setdefault(l, h)
-    order = [_F3_LABEL["xvq"], _F3_LABEL["ivq_psi0"], _F3_LABEL["ivq_true"], _F3_PIPELINE_LABEL]
-    ordered = [(handles_by_label[l], l) for l in order if l in handles_by_label]
-    if ordered:
-        hs, ls_ = zip(*ordered)
-        fig.legend(hs, ls_, loc="lower center", ncol=2)
+        ax = axes[c["row"], c["col"]]
+        _plot_b_panel(ax, x, y_true, y_hat, mass, rho, c["label"], _AXIS_LABEL[c["axis"]],
+                      f"({chr(ord('a') + c['row'] * 3 + c['col'])})")
+
+    if lncs:
+        fig.subplots_adjust(left=0.11, right=0.99, top=0.84, bottom=0.22,
+                             hspace=1.65, wspace=0.35)
+    else:
+        fig.subplots_adjust(left=0.08, right=0.99, top=0.92, bottom=0.14,
+                             hspace=0.75, wspace=0.30)
+
+    fig.supylabel("Influence", fontsize=plt.rcParams["axes.labelsize"], fontweight="bold")
+
+    handles = [
+        Line2D([], [], marker="o", mfc="none", mec=METHOD["truth"]["color"], ls="none",
+               label="True $\\psi$ (RF mean)"),
+        Line2D([], [], marker="o", mfc=METHOD["qij"]["color"], mec="none", ls="none",
+               label=r"$\hat\psi$ (RF mean)"),
+    ]
+    fig.legend(handles=handles, loc="lower center", ncol=2,
+               fontsize=plt.rcParams["legend.fontsize"])
     return fig
 
 
 # ---------------------------------------------------------------------------
-# F7 -- cost
+# Figure C -- cost (replaces F7)
 # ---------------------------------------------------------------------------
 
 _B_GRID_FRAC = [0.0125, 0.025, 0.05, 0.1, 0.2, 0.4, 0.8, 1.0]
 
 
-def _f7_bootstrap_curve(theta_c: np.ndarray, b_grid_frac: list, level: float = 0.95) -> tuple:
-    """theta_c: (S, B) one output's replicates. Returns (curve rows,
-    w_ref (S,) the full-B reference width per draw). Loop over draws
-    and the b grid only, never over N."""
+def _c_bootstrap_curve(theta_c: np.ndarray, b_grid_frac: list, level: float) -> tuple:
+    """theta_c: (S, B) one output's replicates. Returns (curve rows, w_ref
+    (S,) the full-B reference width per draw). `curve` rows now carry
+    p25/p75 as well as the mean (spec: "mean over draws with the
+    interquartile band" -- the module this replaces plotted the mean
+    alone). Loop over draws and the b grid only, never over N."""
     S, B = theta_c.shape
     w_ref = np.full(S, np.nan)
     for s in range(S):
@@ -518,24 +745,24 @@ def _f7_bootstrap_curve(theta_c: np.ndarray, b_grid_frac: list, level: float = 0
             lo, hi = percentile_interval(theta_c[s, :b][:, None], level)[0]
             if np.isfinite(lo) and np.isfinite(hi):
                 errs.append(abs((hi - lo) - w_ref[s]) / w_ref[s])
-        curve.append(dict(b=b, mean=float(np.mean(errs)) if errs else float("nan")))
+        errs = np.array(errs)
+        curve.append(dict(b=b, mean=float(np.mean(errs)) if errs.size else float("nan"),
+                           p25=float(np.percentile(errs, 25)) if errs.size else float("nan"),
+                           p75=float(np.percentile(errs, 75)) if errs.size else float("nan")))
     return curve, w_ref
 
 
-def _f7_qij_point(loaded: dict, output_idx: int, w_ref: np.ndarray, level: float = 0.95) -> dict:
-    xs, errs = [], []
+def _c_qij_point(loaded: dict, j: int, w_ref: np.ndarray, level: float) -> dict:
+    lo_hi = _qij_lo_hi(loaded, j, level)
     n = loaded["theta_hat"].shape[0]
+    xs, errs = [], []
     for i in range(n):
         ref = w_ref[i]
         if not (np.isfinite(ref) and ref > 0):
             continue
-        th, v, a = (loaded["theta_hat"][i, output_idx], loaded["v_tot_hat"][i, output_idx],
-                    loaded["a_bca"][i, output_idx])
+        lo, hi = lo_hi[i]
         nrows = loaded["normalized_rows"][i]
-        if not (np.isfinite(th) and np.isfinite(v) and np.isfinite(a) and np.isfinite(nrows)):
-            continue
-        lo, hi = qij_interval(np.array([th]), np.array([v]), np.array([a]), level)[0]
-        if not (np.isfinite(lo) and np.isfinite(hi)):
+        if not (np.isfinite(lo) and np.isfinite(hi) and np.isfinite(nrows)):
             continue
         xs.append(float(nrows))
         errs.append(abs((hi - lo) - ref) / ref)
@@ -547,333 +774,130 @@ def _f7_qij_point(loaded: dict, output_idx: int, w_ref: np.ndarray, level: float
                 p25=float(np.percentile(errs_a, 25)), p75=float(np.percentile(errs_a, 75)))
 
 
-def _plot_f7_a(ax, curve_rows: list, point_rows: list) -> None:
+def _plot_c_panel(ax, curve: list, pt: dict, wall_times: dict, title: str, panel_lbl: str) -> None:
     lw = plt.rcParams["lines.linewidth"]
     ms = plt.rcParams["lines.markersize"]
-    for cr in curve_rows:
-        b = np.array([r["b"] for r in cr["curve"]], dtype=float)
-        mean = np.array([r["mean"] for r in cr["curve"]])
-        finite = np.isfinite(mean)
-        ax.plot(b[finite], mean[finite], color=METHOD["boot"]["color"], ls=METHOD["boot"]["ls"],
-                lw=lw * 0.6, alpha=0.7, zorder=1)
-    for pt in point_rows:
-        if not (np.isfinite(pt["x"]) and np.isfinite(pt["y"])):
-            continue
+    b = np.array([r["b"] for r in curve], dtype=float)
+    mean = np.array([r["mean"] for r in curve])
+    p25 = np.array([r["p25"] for r in curve])
+    p75 = np.array([r["p75"] for r in curve])
+    finite = np.isfinite(mean)
+    ax.fill_between(b[finite], p25[finite], p75[finite], color=METHOD["boot"]["color"],
+                     alpha=0.18, linewidth=0, zorder=1)
+    ax.plot(b[finite], mean[finite], color=METHOD["boot"]["color"], ls=METHOD["boot"]["ls"],
+            lw=lw * 0.7, zorder=2)
+
+    if np.isfinite(pt["x"]) and np.isfinite(pt["y"]):
         color = METHOD["qij"]["color"]
         if np.isfinite(pt["p25"]) and np.isfinite(pt["p75"]):
             ax.vlines(pt["x"], pt["p25"], pt["p75"], color=color, lw=lw * 0.8, zorder=3)
-        ax.plot(pt["x"], pt["y"], marker=METHOD["qij"]["marker"], color=color, ms=ms * 1.2,
+        ax.plot(pt["x"], pt["y"], marker=METHOD["qij"]["marker"], color=color, ms=ms * 1.1,
                 ls="none", zorder=4)
-        ax.annotate(pt["label"], (pt["x"], pt["y"]), textcoords="offset points", xytext=(5, 4),
-                    fontsize=plt.rcParams["xtick.labelsize"], color=color)
-    h1 = ax.plot([], [], color=METHOD["boot"]["color"], ls=METHOD["boot"]["ls"], lw=lw * 0.6,
-                 label="Bootstrap (first $b$ replicates)")[0]
-    h2 = ax.plot([], [], marker=METHOD["qij"]["marker"], color=METHOD["qij"]["color"], ls="none",
-                 ms=ms * 1.2, label="QIJ (median, IQR)")[0]
-    _legend(ax, handles=[h1, h2], loc="upper right")
+
+    # Two lines, not one: at panel widths of ~1.2in, "QIJ x s / boot y s"
+    # on one line is wider than the panel and spills into the y-tick
+    # labels on the left; stacked, each line is about half as wide.
+    fs = _STATE["annotation_fontsize"]
+    ax.text(0.96, 0.97, f"QIJ {wall_times['qij']:.2g}s\nboot {wall_times['boot']:.2g}s",
+            transform=ax.transAxes, ha="right", va="top", fontsize=fs, color="#555555",
+            linespacing=1.15)
+
     ax.set_xscale("log")
     ax.set_ylim(bottom=0)
-    ax.set_xlabel("Normalized rows")
-    ax.set_ylabel("Relative width error (vs. converged bootstrap)")
-    _panel_label(ax, "(a)")
-
-
-def _f7_wall_time_rows(run_dir: str) -> list:
-    """One row per (dataset, estimator) directory, not per output: the
-    Fundamental Plane's four outputs share one run and so one wall
-    time (`wall_time_total`/boot's `wall_time` are unsuffixed, plan
-    section 5 amendment 3), so this collapses to a single row labelled
-    "FP (4 outputs)" rather than the same numbers repeated four times
-    -- the honest rendering of one shared cost, not a simplification."""
-    rows = []
-    for dataset, estimator, path in _product_dirs(run_dir):
-        truth = pd.read_parquet(os.path.join(path, "truth.parquet"))
-        outputs = _outputs(truth)
-        loaded = _load_draws(path, outputs)
-        qij_wt = loaded["wall_time_qij"]
-        qij_wt = qij_wt[np.isfinite(qij_wt)]
-        boot_wt = loaded["wall_time_boot"]
-        boot_wt = boot_wt[np.isfinite(boot_wt)]
-        label = (f"{dataset.upper()} ({len(outputs)} outputs)" if len(outputs) > 1
-                  else f"{dataset}/{estimator}")
-        rows.append(dict(
-            label=label,
-            qij=float(np.median(qij_wt)) if qij_wt.size else float("nan"),
-            boot=float(np.median(boot_wt)) if boot_wt.size else float("nan"),
-        ))
-    return rows
-
-
-def _plot_f7_b(ax, rows: list) -> None:
-    n = len(rows)
-    x = np.arange(n)
-    width = 0.35
-    qij_vals = np.array([r["qij"] for r in rows])
-    boot_vals = np.array([r["boot"] for r in rows])
-    ax.bar(x - width / 2, qij_vals, width, color=METHOD["qij"]["color"], label=METHOD["qij"]["label"],
-           edgecolor="black", linewidth=0.5)
-    ax.bar(x + width / 2, boot_vals, width, color=METHOD["boot"]["color"], label=METHOD["boot"]["label"],
-           edgecolor="black", linewidth=0.5, hatch="//")
-    ax.set_yscale("log")
-    ax.set_xticks(x)
-    ax.set_xticklabels([r["label"] for r in rows], rotation=40, ha="right")
-    ax.set_ylabel("Wall time per run (s)")
-    _legend(ax, loc="upper left")
-    _panel_label(ax, "(b)")
-
-
-def fig7(run_dir: str, lncs: bool = False) -> plt.Figure:
-    """F7 -- cost. (a) relative width error vs normalized rows: the
-    bootstrap's own curve (width error of its first b replicates
-    against its full-B reference) per estimand, plus QIJ's median/IQR
-    point at the same reference. (b) wall time per run, one pair of
-    bars per (dataset, estimator) directory -- FP appears once."""
-    _use_style(lncs)
-    figsize = (4.80, 2.20) if lncs else (11.0, 4.6)
-
-    curve_rows, point_rows = [], []
-    for dataset, estimator, path in _product_dirs(run_dir):
-        truth = pd.read_parquet(os.path.join(path, "truth.parquet"))
-        outputs = _outputs(truth)
-        loaded = _load_draws(path, outputs)
-        for j, o in enumerate(outputs):
-            curve, w_ref = _f7_bootstrap_curve(loaded["theta_boot"][:, :, j], _B_GRID_FRAC)
-            pt = _f7_qij_point(loaded, j, w_ref)
-            label = f"{dataset}/{estimator}" if len(outputs) == 1 else f"{dataset}/{estimator}:{o}"
-            curve_rows.append(dict(label=label, curve=curve))
-            point_rows.append(dict(label=label, **pt))
-
-    fig, axes = plt.subplots(1, 2, figsize=figsize)
-    _plot_f7_a(axes[0], curve_rows, point_rows)
-    _plot_f7_b(axes[1], _f7_wall_time_rows(run_dir))
-    return fig
-
-
-# ---------------------------------------------------------------------------
-# F9 -- the initial influence estimate against the truth
-# ---------------------------------------------------------------------------
-
-def _plot_f9_scatter(ax, psi0: np.ndarray, psi: np.ndarray, title: str, panel_lbl: str) -> None:
-    finite = np.isfinite(psi0) & np.isfinite(psi)
-    psi0, psi = psi0[finite], psi[finite]
-    if psi.size == 0:
-        ax.text(0.5, 0.5, "no data", transform=ax.transAxes, ha="center", va="center")
-        ax.set_title(title)
-        _panel_label(ax, panel_lbl)
-        return
-    lo = float(min(psi.min(), psi0.min()))
-    hi = float(max(psi.max(), psi0.max()))
-    if hi <= lo:
-        hi = lo + 1.0
-    pad = 0.03 * (hi - lo)
-    ax.plot([lo - pad, hi + pad], [lo - pad, hi + pad], color=METHOD["truth"]["color"], ls=":", lw=1.2, zorder=1)
-    ax.scatter(psi, psi0, s=7, color=METHOD["qij"]["color"], alpha=0.35, linewidths=0, zorder=2)
-    ax.set_xlim(lo - pad, hi + pad)
-    ax.set_ylim(lo - pad, hi + pad)
-    ax.set_xlabel(r"True $\psi(x_i)$")
-    ax.set_ylabel(r"$\hat\psi_0(x_i)$")
     ax.set_title(title)
-    _panel_label(ax, panel_lbl)
-
-    if psi0.size >= 2 and np.std(psi0) > 0 and np.std(psi) > 0:
-        rs = float(spearmanr(psi0, psi).correlation)
-        text = f"$r_s = {rs:.3f}$"
-    else:
-        text = "$r_s$ undefined"
-    ax.text(0.04, 0.96, text, transform=ax.transAxes, ha="left", va="top",
-            fontsize=plt.rcParams.get("annotation.fontsize", 9))
+    # No per-panel x/y label -- every one of the six panels shares the
+    # same two axis quantities (unlike Figure B, where the x quantity
+    # differs by row), so `fig_c` sets them once with `fig.supxlabel`/
+    # `fig.supylabel` rather than repeating identical text six times in
+    # a grid with no room to spare.
+    _panel_label(ax, panel_lbl, dy=1.34)
 
 
-def _plot_f9_curve(ax, dir_path: str, output: str, panel_lbl: str) -> None:
-    """The Pareto shape's psi_hat_0, ranked, with its +/- sigma band
-    (`qij_points.parquet`'s own psi0_<o>/sigma_<o> columns). No
-    prototype-influence overlay: see the module docstring."""
-    pts = pd.read_parquet(os.path.join(dir_path, "qij_points.parquet"))
-    psi0 = pts[f"psi0_{output}"].to_numpy(dtype=float)
-    sigma = pts[f"sigma_{output}"].to_numpy(dtype=float)
-    order = np.argsort(psi0)
-    x = np.arange(order.size)
-    ax.axhline(0, color=METHOD["truth"]["color"], ls=":", lw=1.0, zorder=0)
-    ax.fill_between(x, (psi0 - sigma)[order], (psi0 + sigma)[order],
-                     color=METHOD["qij"]["color"], alpha=0.15, linewidth=0, zorder=0,
-                     label=r"$\hat\psi_0 \pm \sigma$")
-    ax.plot(x, psi0[order], color=METHOD["qij"]["color"], lw=1.2, zorder=1,
-            label=r"Initial influence estimate $\hat\psi_0$")
-    ax.set_xlabel(r"Points, ranked by $\hat\psi_0$")
-    ax.set_ylabel("Influence")
-    ax.set_title("Pareto shape: initial influence estimate")
-    _panel_label(ax, panel_lbl)
-    _legend(ax, loc="best")
-
-
-def fig9(run_dir: str, outputs: list = None, lncs: bool = False) -> plt.Figure:
-    """F9 -- four scatter panels of psi_hat_0 against the true psi
-    (`qij_points.parquet`), plus the Pareto-shape curve panel. `outputs`
-    optionally names exactly four (dataset, estimator, output) triples
-    to draw (default: the first four discovered oracle-influence
-    estimands, excluding pareto/shape, which the curve panel already
-    covers) -- the pinned products do not say which four an "estimand"
-    list should be, so this default is this file's own choice, not a
-    spec value."""
-    _use_style(lncs)
-    curve_dir = None
-    for dataset, estimator, path in _product_dirs(run_dir):
-        if dataset == "pareto" and estimator == "shape":
-            curve_dir = path
-            curve_truth = pd.read_parquet(os.path.join(path, "truth.parquet"))
-            curve_output = _outputs(curve_truth)[0]
-            break
-    if curve_dir is None:
-        raise FileNotFoundError(f"no pareto/shape estimand found under {run_dir}")
-
-    all_oracle = _estimands(run_dir, require_oracle=True)
-    candidates = [e for e in all_oracle
-                  if not (e["dataset"] == "pareto" and e["estimator"] == "shape")]
-    if outputs is None:
-        chosen = candidates[:4]
-    else:
-        by_key = {(e["dataset"], e["estimator"], e["output"]): e for e in all_oracle}
-        chosen = [by_key[k] for k in outputs]
-    if len(chosen) < 4:
-        raise FileNotFoundError(
-            f"fewer than 4 oracle-influence estimands with qij_points.parquet under {run_dir}"
-        )
-    chosen = chosen[:4]
-
-    figsize = (4.80, 3.4) if lncs else (12.0, 7.0)
-    fig = plt.figure(figsize=figsize)
-    gs = GridSpec(2, 3, figure=fig)
-    axes = [fig.add_subplot(gs[0, 0]), fig.add_subplot(gs[0, 1]),
-            fig.add_subplot(gs[0, 2]), fig.add_subplot(gs[1, 0])]
-
-    for ax, e, lbl in zip(axes, chosen, ["(a)", "(b)", "(c)", "(d)"]):
-        pts = pd.read_parquet(os.path.join(e["dir"], "qij_points.parquet"))
-        psi0 = pts[f"psi0_{e['output']}"].to_numpy(dtype=float)
-        psi = pts[f"psi_{e['output']}"].to_numpy(dtype=float)
-        _plot_f9_scatter(ax, psi0, psi, e["label"], lbl)
-
-    ax_curve = fig.add_subplot(gs[1, 1:3])
-    _plot_f9_curve(ax_curve, curve_dir, curve_output, "(e)")
-    return fig
-
-
-# ---------------------------------------------------------------------------
-# F10 -- cost against N
-# ---------------------------------------------------------------------------
-
-def _f10_coverage(loaded: dict, output_idx: int, level: float) -> dict:
-    n = loaded["theta_hat"].shape[0]
-    hit_q = tot_q = hit_b = tot_b = 0
-    for i in range(n):
-        tt = loaded["theta_true"][i, output_idx]
-        th, v, a = (loaded["theta_hat"][i, output_idx], loaded["v_tot_hat"][i, output_idx],
-                    loaded["a_bca"][i, output_idx])
-        if np.isfinite(tt) and np.isfinite(th) and np.isfinite(v) and np.isfinite(a):
-            lo, hi = qij_interval(np.array([th]), np.array([v]), np.array([a]), level)[0]
-            if np.isfinite(lo) and np.isfinite(hi):
-                tot_q += 1
-                hit_q += int(lo <= tt <= hi)
-        lo_b, hi_b = percentile_interval(loaded["theta_boot"][i, :, output_idx][:, None], level)[0]
-        if np.isfinite(tt) and np.isfinite(lo_b) and np.isfinite(hi_b):
-            tot_b += 1
-            hit_b += int(lo_b <= tt <= hi_b)
-    p_q = hit_q / tot_q if tot_q else float("nan")
-    se_q = float(np.sqrt(p_q * (1 - p_q) / tot_q)) if tot_q else float("nan")
-    p_b = hit_b / tot_b if tot_b else float("nan")
-    se_b = float(np.sqrt(p_b * (1 - p_b) / tot_b)) if tot_b else float("nan")
-    return dict(p_qij=p_q, se_qij=se_q, p_boot=p_b, se_boot=se_b)
-
-
-def _plot_f10_rows(ax, rows_stat: list, B_ref) -> None:
-    Ns = np.array([r["N"] for r in rows_stat], dtype=float)
-    med = np.array([r["median"] for r in rows_stat])
-    p25 = np.array([r["p25"] for r in rows_stat])
-    p75 = np.array([r["p75"] for r in rows_stat])
-    ax.fill_between(Ns, p25, p75, color=METHOD["qij"]["color"], alpha=0.18, linewidth=0)
-    ax.plot(Ns, med, color=METHOD["qij"]["color"], ls=METHOD["qij"]["ls"],
-            marker=METHOD["qij"]["marker"], label=METHOD["qij"]["label"])
-    if B_ref is not None:
-        ax.axhline(B_ref, color=METHOD["boot"]["color"], ls=METHOD["boot"]["ls"], lw=1.2,
-                   label="Bootstrap (fixed $B$)")
-    ax.set_xscale("log")
-    ax.set_yscale("log")
-    ax.set_xlabel("$N$")
-    ax.set_ylabel("Normalized rows")
-    _legend(ax, loc="best")
-    _panel_label(ax, "(a)")
-
-
-def _plot_f10_time(ax, time_stat: list) -> None:
-    Ns = np.array([r["N"] for r in time_stat], dtype=float)
-    med = np.array([r["median"] for r in time_stat])
-    p25 = np.array([r["p25"] for r in time_stat])
-    p75 = np.array([r["p75"] for r in time_stat])
-    ax.fill_between(Ns, p25, p75, color=METHOD["qij"]["color"], alpha=0.18, linewidth=0)
-    ax.plot(Ns, med, color=METHOD["qij"]["color"], ls=METHOD["qij"]["ls"], marker=METHOD["qij"]["marker"])
-    ax.axhline(1.0, color=METHOD["truth"]["color"], ls=":", lw=1.0)
-    ax.set_xscale("log")
-    ax.set_xlabel("$N$")
-    ax.set_ylabel("Wall time ratio (QIJ / bootstrap)")
-    _panel_label(ax, "(b)")
-
-
-def _plot_f10_coverage(ax, cov_rows: list, outputs: list, level: float) -> None:
-    Ns_all = sorted(set(r["N"] for r in cov_rows))
-    lw = plt.rcParams["lines.linewidth"]
-    for i, o in enumerate(outputs):
-        color = OUTPUT_COLORS[i % len(OUTPUT_COLORS)]
-        for method, ls, marker, key_p, key_se in (
-            ("qij", "-", "o", "p_qij", "se_qij"), ("boot", "--", "s", "p_boot", "se_boot"),
-        ):
-            xs, ys, ses = [], [], []
-            for N in Ns_all:
-                match = [r for r in cov_rows if r["N"] == N and r["output"] == o]
-                if not match:
-                    continue
-                xs.append(N)
-                ys.append(match[0][key_p])
-                ses.append(match[0][key_se])
-            xs_a = np.array(xs, dtype=float)
-            ys_a = np.array(ys, dtype=float)
-            ses_a = np.array(ses, dtype=float)
-            band = np.where(np.isfinite(ses_a), 1.96 * ses_a, 0.0)
-            ax.fill_between(xs_a, ys_a - band, ys_a + band, color=color, alpha=0.12, linewidth=0)
-            ax.plot(xs_a, ys_a, color=color, ls=ls, marker=marker, ms=4, lw=lw * 0.9,
-                    label=f"{o} ({METHOD[method]['label']})")
-    ax.axhline(level, color=METHOD["truth"]["color"], ls=":", lw=1.0)
-    ax.set_xscale("log")
-    ax.set_ylim(0.5, 1.02)
-    ax.set_xlabel("$N$")
-    ax.set_ylabel(f"Coverage at {level:.0%}")
-    _legend(ax, loc="lower left", ncol=2, fontsize=plt.rcParams["legend.fontsize"] * 0.85)
-    _panel_label(ax, "(c)")
-
-
-def fig10(run_dirs: dict, lncs: bool = False, level: float = 0.95) -> plt.Figure:
-    """F10 -- cost against N, from the cost-vs-N study's one (dataset,
-    estimator) pair. `run_dirs` maps N -> the product directory (the
-    `N<size>` directory itself, holding that N's `truth.parquet`,
-    `qij.parquet` and `boot.h5`) for that N's cost_vs_n run (see the
-    module docstring: no product records N, so this is supplied by the
-    caller, not discovered). Works for a cost study on any dataset and
-    estimator -- nothing here names one.
-
-    (a) normalized rows vs N (QIJ, median/IQR over draws; bootstrap's
-    is the fixed replicate count B, a horizontal reference).
-    (b) wall time ratio QIJ/bootstrap vs N, within the same draw on the
-    same worker (cost layer 2, plan section 8) -- never absolute
-    seconds compared across the N sweep's separate runs.
-    (c) coverage at `level` of both intervals, one line per (output,
-    method), NOT pooled across the Fundamental Plane's four outputs
-    (the 18 September ruling): they share one run and one set of bins,
-    so a pooled band would be tighter than it has earned.
+def fig_c(run_dir: str, timing_dir: str, lncs: bool = False) -> plt.Figure:
+    """Figure C -- cost (spec section "Figure C", replaces F7). 2x3 panels
+    at the spec's fixed grid positions. Each panel: the bootstrap's own
+    relative width error of its 0.95 interval after the first b
+    replicates, against its full-B reference width, mean over draws with
+    the interquartile band (`boot.h5`'s replicates, prefix quantiles); the
+    QIJ marker at the coordinate's median normalized rows with
+    interquartile whiskers, its width error against the SAME converged-
+    bootstrap reference (`run_dir`'s `qij.parquet`); in the corner,
+    "QIJ x s / bootstrap y s", the two wall times FROM THE SEPARATE
+    TIMING RUN (one worker, one thread) -- never
+    `run_dir`'s own wall time, which was not captured under that
+    discipline (cost layer 3, `study.py`'s module docstring). The Fundamental
+    Plane's four outputs share one run and hence one wall-time pair; both
+    FP panels ((1,3) FP a and (2,1) FP scatter) print the identical pair,
+    which is correct, not a bug -- the tex caption should say so, since
+    this figure cannot.
     """
     _use_style(lncs)
-    Ns = sorted(run_dirs)
-    rows_stat, time_stat, cov_rows = [], [], []
-    B_ref = None
-    outputs_ref = None
+    figsize = FIGSIZE_C_LNCS if lncs else FIGSIZE_C_DRAFT
+    fig, axes = plt.subplots(2, 3, figsize=figsize, constrained_layout=False)
 
+    timing_cache = {}
+    for c in _COORDS:
+        path = _product_dir(run_dir, c["dataset"], c["estimator"])
+        truth = pd.read_parquet(os.path.join(path, "truth.parquet"))
+        outputs = _outputs(truth)
+        j = outputs.index(c["output"])
+        loaded = _load_draws(path, outputs)
+        curve, w_ref = _c_bootstrap_curve(loaded["theta_boot"][:, :, j], _B_GRID_FRAC, _LEVEL)
+        pt = _c_qij_point(loaded, j, w_ref, _LEVEL)
+
+        key = (c["dataset"], c["estimator"])
+        if key not in timing_cache:
+            tpath = _product_dir(timing_dir, c["dataset"], c["estimator"])
+            ttruth = pd.read_parquet(os.path.join(tpath, "truth.parquet"))
+            touts = _outputs(ttruth)
+            tloaded = _load_draws(tpath, touts)
+            timing_cache[key] = dict(
+                qij=float(np.nanmedian(tloaded["wall_time_qij"])),
+                boot=float(np.nanmedian(tloaded["wall_time_boot"])),
+            )
+
+        ax = axes[c["row"], c["col"]]
+        panel_lbl = f"({chr(ord('a') + c['row'] * 3 + c['col'])})"
+        _plot_c_panel(ax, curve, pt, timing_cache[key], c["label"], panel_lbl)
+
+    if lncs:
+        fig.subplots_adjust(left=0.11, right=0.99, top=0.86, bottom=0.30,
+                             hspace=1.55, wspace=0.32)
+    else:
+        fig.subplots_adjust(left=0.08, right=0.99, top=0.94, bottom=0.20,
+                             hspace=0.55, wspace=0.28)
+
+    # Explicit y for the sup-label (rather than matplotlib's default,
+    # which sits at the very bottom of the figure): the fig-level legend
+    # ALSO wants that spot, so the label is pinned just under the tick
+    # labels and the legend given the strip below it, stacked on
+    # purpose rather than colliding.
+    sup_y = 0.155 if lncs else 0.115
+    fig.supxlabel("Normalized rows", y=sup_y, fontsize=plt.rcParams["axes.labelsize"], fontweight="bold")
+    fig.supylabel("Rel. width error", fontsize=plt.rcParams["axes.labelsize"], fontweight="bold")
+
+    h1 = Line2D([], [], color=METHOD["boot"]["color"], ls=METHOD["boot"]["ls"],
+                lw=plt.rcParams["lines.linewidth"] * 0.7, label="Bootstrap (first $b$)")
+    h2 = Line2D([], [], marker=METHOD["qij"]["marker"], color=METHOD["qij"]["color"], ls="none",
+                ms=plt.rcParams["lines.markersize"] * 1.1, label="QIJ (median, IQR)")
+    fig.legend(handles=[h1, h2], loc="lower center", ncol=2,
+               fontsize=plt.rcParams["legend.fontsize"])
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Figure D -- cost against N (was F10, design unchanged; adds the IMF
+# sweep pair when an IMF cost-vs-N run is supplied).
+# ---------------------------------------------------------------------------
+
+def _d_series_fp(run_dirs: dict, level: float) -> dict:
+    """One pass over the FP cost-vs-N sweep's N values, building every
+    series Figure D's top row needs: normalized rows, the QIJ/bootstrap
+    wall-time ratio, coverage of both intervals per output, and the width
+    ratio -- one `_load_draws` per N, not one per series."""
+    Ns = sorted(run_dirs)
+    rows_stat, time_stat, width_stat, cov_rows = [], [], [], []
+    outputs_ref, B_ref = None, None
     for N in Ns:
         path = run_dirs[N]
         truth = pd.read_parquet(os.path.join(path, "truth.parquet"))
@@ -882,34 +906,274 @@ def fig10(run_dirs: dict, lncs: bool = False, level: float = 0.95) -> plt.Figure
             outputs_ref = outputs
         loaded = _load_draws(path, outputs)
         if B_ref is None:
-            B_ref = loaded["theta_boot"].shape[1]
+            B_ref = loaded["B"]
 
-        nrows = loaded["normalized_rows"]
-        nrows = nrows[np.isfinite(nrows)]
-        rows_stat.append(dict(
-            N=N,
-            median=float(np.median(nrows)) if nrows.size else float("nan"),
-            p25=float(np.percentile(nrows, 25)) if nrows.size else float("nan"),
-            p75=float(np.percentile(nrows, 75)) if nrows.size else float("nan"),
-        ))
+        rows_stat.append(dict(N=N, **_stat(loaded["normalized_rows"])))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            tratio = loaded["wall_time_qij"] / loaded["wall_time_boot"]
+        time_stat.append(dict(N=N, **_stat(tratio)))
+
+        wratios = []
+        for j, o in enumerate(outputs):
+            cov_qij, cov_boot = _coverage_pair(loaded, j, level)
+            cov_rows.append(dict(N=N, output=o, p_qij=cov_qij["p"], se_qij=cov_qij["se"],
+                                  p_boot=cov_boot["p"], se_boot=cov_boot["se"]))
+            wratios.append(_width_ratio(loaded, j, level))
+        width_stat.append(dict(N=N, **_stat(np.concatenate(wratios))))
+    return dict(rows_stat=rows_stat, time_stat=time_stat, width_stat=width_stat,
+                cov_rows=cov_rows, outputs=outputs_ref, B_ref=B_ref)
+
+
+def _d_series_imf(imf_run_dirs: dict, level: float,
+                   coverage_outputs=("slope", "Mstar", "p")) -> dict:
+    """The IMF sweep's series (spec: "coverage ... (slope, M*, p)" --
+    gamma_shape/gamma_scale are excluded here exactly as Pareto and FP
+    b/c are excluded from the fixed six, per the spec's own naming) plus
+    the two failure fractions the sweet-spot panel needs: the share of
+    bootstrap replicates that hit the IMF's box constraint (NaN) at each
+    N, and QIJ's own evaluation failure fraction at the same N -- "QIJ's
+    zero" in the spec is a claim about the data, so it is computed here,
+    not hardcoded."""
+    Ns = sorted(imf_run_dirs)
+    time_stat, cov_rows, boot_fail, qij_fail = [], [], [], []
+    for N in Ns:
+        path = imf_run_dirs[N]
+        truth = pd.read_parquet(os.path.join(path, "truth.parquet"))
+        outputs = _outputs(truth)
+        loaded = _load_draws(path, outputs)
 
         with np.errstate(divide="ignore", invalid="ignore"):
-            ratio = loaded["wall_time_qij"] / loaded["wall_time_boot"]
-        ratio = ratio[np.isfinite(ratio)]
-        time_stat.append(dict(
-            N=N,
-            median=float(np.median(ratio)) if ratio.size else float("nan"),
-            p25=float(np.percentile(ratio, 25)) if ratio.size else float("nan"),
-            p75=float(np.percentile(ratio, 75)) if ratio.size else float("nan"),
-        ))
+            tratio = loaded["wall_time_qij"] / loaded["wall_time_boot"]
+        time_stat.append(dict(N=N, **_stat(tratio)))
 
-        for j, o in enumerate(outputs):
-            cov = _f10_coverage(loaded, j, level)
-            cov_rows.append(dict(N=N, output=o, **cov))
+        for o in coverage_outputs:
+            if o not in outputs:
+                continue
+            j = outputs.index(o)
+            cov_qij, cov_boot = _coverage_pair(loaded, j, level)
+            cov_rows.append(dict(N=N, output=o, p_qij=cov_qij["p"], se_qij=cov_qij["se"],
+                                  p_boot=cov_boot["p"], se_boot=cov_boot["se"]))
 
-    figsize = (4.80, 2.3) if lncs else (13.5, 4.4)
-    fig, axes = plt.subplots(1, 3, figsize=figsize)
-    _plot_f10_rows(axes[0], rows_stat, B_ref)
-    _plot_f10_time(axes[1], time_stat)
-    _plot_f10_coverage(axes[2], cov_rows, outputs_ref, level)
+        n_draws = len(loaded["s"])
+        boot_total = loaded["B"] * n_draws
+        boot_fail.append(dict(N=N, frac=float(np.sum(loaded["n_failed_boot"])) / boot_total
+                               if boot_total else float("nan")))
+        evals_total = float(np.sum(loaded["evals_total"]))
+        qij_fail.append(dict(N=N, frac=float(np.sum(loaded["n_failed_qij"])) / evals_total
+                              if evals_total > 0 else float("nan")))
+    return dict(time_stat=time_stat, cov_rows=cov_rows, boot_fail=boot_fail, qij_fail=qij_fail,
+                coverage_outputs=[o for o in coverage_outputs])
+
+
+def _raise_primary_axis(ax, ax2) -> None:
+    """`ax.twinx()` stacks the new axes `ax2` ABOVE `ax` by default, so
+    anything `ax2` draws -- including a line whose only job is to sit
+    under a legend -- paints over a legend attached to `ax`. Every panel
+    below puts its combined legend on `ax`, so this is called right after
+    each `twinx()` to swap the stacking order back, once, rather than
+    fighting z-order per-artist."""
+    ax.set_zorder(ax2.get_zorder() + 1)
+    ax.patch.set_visible(False)
+
+
+def _plot_d_cost(ax, series: dict, panel_lbl: str) -> None:
+    """(a) normalized rows vs N (QIJ median/IQR, bootstrap's fixed-B
+    reference) on the left axis; the QIJ/bootstrap wall-time ratio
+    (median/IQR) on a twin right axis in a neutral third colour -- it is a
+    ratio, not a second method, so it gets neither the QIJ nor the
+    bootstrap hue (style guide section 1: never let one hue mean two
+    things)."""
+    rows_stat, time_stat, B_ref = series["rows_stat"], series["time_stat"], series["B_ref"]
+    Ns = np.array([r["N"] for r in rows_stat], dtype=float)
+    med = np.array([r["median"] for r in rows_stat])
+    p25 = np.array([r["p25"] for r in rows_stat])
+    p75 = np.array([r["p75"] for r in rows_stat])
+    ax.fill_between(Ns, p25, p75, color=METHOD["qij"]["color"], alpha=0.18, linewidth=0)
+    ax.plot(Ns, med, color=METHOD["qij"]["color"], ls=METHOD["qij"]["ls"],
+            marker=METHOD["qij"]["marker"], label="Normalized rows (QIJ)")
+    if B_ref is not None:
+        ax.axhline(B_ref, color=METHOD["boot"]["color"], ls=METHOD["boot"]["ls"], lw=1.2,
+                   label="Bootstrap (fixed $B$)")
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("$N$")
+    ax.set_ylabel("Normalized rows")
+
+    ax2 = ax.twinx()
+    tN = np.array([r["N"] for r in time_stat], dtype=float)
+    tmed = np.array([r["median"] for r in time_stat])
+    tp25 = np.array([r["p25"] for r in time_stat])
+    tp75 = np.array([r["p75"] for r in time_stat])
+    ax2.fill_between(tN, tp25, tp75, color=SECONDARY, alpha=0.12, linewidth=0)
+    ax2.plot(tN, tmed, color=SECONDARY, ls="-.", marker="D", ms=3.2,
+             label="Wall-time ratio (QIJ/boot)")
+    ax2.set_yscale("log")
+    ax2.set_ylabel("Wall-time ratio", color=SECONDARY, labelpad=9)
+    ax2.tick_params(axis="y", colors=SECONDARY)
+    _raise_primary_axis(ax, ax2)
+
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    _legend(ax, handles=h1 + h2, loc="lower right", fontsize=plt.rcParams["legend.fontsize"] * 0.7,
+            handlelength=1.4, labelspacing=0.3, borderpad=0.4)
+    ax.set_title("Cost vs $N$")
+    _panel_label(ax, panel_lbl, dx=-0.22)
+
+
+def _plot_d_coverage(ax, cov_rows: list, outputs: list, level: float, panel_lbl: str,
+                      width_stat: list = None) -> None:
+    """Coverage of both intervals vs N, one thin line per (output,
+    method) with a per-output MC-error band -- pooling across outputs
+    would be tighter than the FP's shared run and bins have earned (the
+    same ruling the module this replaces made for old F10(c)). When
+    `width_stat` is given (the FP row only; the spec names width ratio
+    for panel (b), not for the IMF coverage panel (c)), the median width
+    ratio is added on a twin axis."""
+    Ns_all = sorted(set(r["N"] for r in cov_rows))
+    lw = plt.rcParams["lines.linewidth"]
+    for i, o in enumerate(outputs):
+        color = OUTPUT_COLORS[i % len(OUTPUT_COLORS)]
+        for method, ls, marker, kp, ks in (
+            ("qij", "-", "o", "p_qij", "se_qij"), ("boot", "--", "s", "p_boot", "se_boot"),
+        ):
+            xs, ys, ses = [], [], []
+            for N in Ns_all:
+                match = [r for r in cov_rows if r["N"] == N and r["output"] == o]
+                if not match:
+                    continue
+                xs.append(N)
+                ys.append(match[0][kp])
+                ses.append(match[0][ks])
+            xs_a, ys_a, ses_a = np.array(xs, dtype=float), np.array(ys, dtype=float), np.array(ses, dtype=float)
+            band = np.where(np.isfinite(ses_a), 1.96 * ses_a, 0.0)
+            ax.fill_between(xs_a, ys_a - band, ys_a + band, color=color, alpha=0.10, linewidth=0)
+            ax.plot(xs_a, ys_a, color=color, ls=ls, marker=marker, ms=3, lw=lw * 0.8)
+    ax.axhline(level, color=METHOD["truth"]["color"], ls=":", lw=1.0)
+    ax.set_xscale("log")
+    ax.set_ylim(0.5, 1.02)
+    ax.set_xlabel("$N$")
+    ax.set_ylabel(f"Coverage at {level:.0%}")
+
+    if width_stat is not None:
+        ax2 = ax.twinx()
+        wN = np.array([r["N"] for r in width_stat], dtype=float)
+        wmed = np.array([r["median"] for r in width_stat])
+        ax2.plot(wN, wmed, color=SECONDARY, ls="-.", marker="D", ms=3.2,
+                 label="Width ratio (QIJ/boot)")
+        ax2.axhline(1.0, color=SECONDARY, ls=":", lw=0.8)
+        ax2.set_ylabel("Width ratio", color=SECONDARY, labelpad=9)
+        ax2.tick_params(axis="y", colors=SECONDARY)
+        ax2.yaxis.set_major_locator(plt.MaxNLocator(3))
+        _raise_primary_axis(ax, ax2)
+
+    # Compact legend: one swatch per output (colour identifies it) plus
+    # the method linestyle/marker convention, stated once.
+    out_handles = [Line2D([], [], color=OUTPUT_COLORS[i % len(OUTPUT_COLORS)], ls="-",
+                          label=o) for i, o in enumerate(outputs)]
+    method_handles = [Line2D([], [], color="#666666", ls=METHOD[k]["ls"],
+                              marker=METHOD[k]["marker"], ms=3, label=METHOD[k]["label"])
+                       for k in ("qij", "boot")]
+    _legend(ax, handles=out_handles + method_handles, loc="lower left",
+            ncol=2, fontsize=plt.rcParams["legend.fontsize"] * 0.7)
+    ax.set_title("Reliability vs $N$")
+    _panel_label(ax, panel_lbl, dx=-0.22)
+
+
+def _plot_d_sweet_spot(ax, series_imf: dict, panel_lbl: str) -> None:
+    """The IMF sweet-spot panel: wall-time ratio vs N on the left axis
+    (where QIJ's cost advantage over the bootstrap grows), and, on a twin
+    right axis, the fraction of bootstrap replicates that hit the box
+    constraint at that N against QIJ's own (near-zero, per the package
+    plan's rare-support finding, but measured here rather than assumed)."""
+    time_stat = series_imf["time_stat"]
+    Ns = np.array([r["N"] for r in time_stat], dtype=float)
+    med = np.array([r["median"] for r in time_stat])
+    p25 = np.array([r["p25"] for r in time_stat])
+    p75 = np.array([r["p75"] for r in time_stat])
+    ax.fill_between(Ns, p25, p75, color=METHOD["qij"]["color"], alpha=0.15, linewidth=0)
+    ax.plot(Ns, med, color=METHOD["qij"]["color"], ls="-", marker="o", ms=3.5,
+            label="Wall-time ratio (QIJ/boot)")
+    ax.axhline(1.0, color=METHOD["truth"]["color"], ls=":", lw=1.0)
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("$N$")
+    ax.set_ylabel("Wall-time ratio")
+
+    ax2 = ax.twinx()
+    bN = [r["N"] for r in series_imf["boot_fail"]]
+    bfrac = [r["frac"] for r in series_imf["boot_fail"]]
+    qN = [r["N"] for r in series_imf["qij_fail"]]
+    qfrac = [r["frac"] for r in series_imf["qij_fail"]]
+    ax2.plot(bN, [100.0 * f for f in bfrac], color=METHOD["boot"]["color"], ls="--", marker="s",
+             ms=3.2, label="Bootstrap at box constraint")
+    ax2.plot(qN, [100.0 * f for f in qfrac], color=METHOD["qij"]["color"], ls=":", marker="o",
+             ms=2.8, label="QIJ at box constraint")
+    ax2.set_ylim(bottom=0)
+    # Percent, not a bare fraction: "0.16%" is half the character width of
+    # "0.0016" at this panel's tiny right-margin allowance, and the
+    # earlier fraction-formatted ticks clipped against the figure edge
+    # even with generous labelpad.
+    ax2.set_ylabel("At constraint (%)", color=METHOD["boot"]["color"], labelpad=7)
+    ax2.tick_params(axis="y", colors=METHOD["boot"]["color"])
+    ax2.yaxis.set_major_locator(plt.MaxNLocator(3))
+    _raise_primary_axis(ax, ax2)
+
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    _legend(ax, handles=h1 + h2, loc="upper left", fontsize=plt.rcParams["legend.fontsize"] * 0.8)
+    ax.set_title("IMF sweet spot")
+    _panel_label(ax, panel_lbl, dx=-0.22)
+
+
+def fig_d(run_dirs: dict, imf_run_dirs: dict = None,
+          lncs: bool = False, level: float = _LEVEL) -> plt.Figure:
+    """Figure D -- cost against sample size (spec section "Figure D",
+    design unchanged from F10). `run_dirs` maps N -> the Fundamental
+    Plane cost-vs-N product directory for that N (as F10 took it: no
+    product records N, so the caller supplies the mapping,
+    `scripts/make_figures.py`'s `_cost_dirs` builds it by globbing).
+
+    (a) normalized rows and the QIJ/bootstrap wall-time ratio against N.
+    (b) coverage of both intervals against N, one thin line per FP output
+    with per-output MC bands, and the width ratio.
+
+    `imf_run_dirs`, optional, is the same kind of mapping for an IMF
+    cost-vs-N sweep; when given, a second row is added: (c) coverage of
+    both intervals for the IMF's slope/M*/p against N, and (d) the
+    wall-time ratio against N together with the fraction of bootstrap
+    replicates hitting the box constraint at each N and QIJ's own (the
+    "sweet-spot" panel). Layout and figsize both key off whether
+    `imf_run_dirs` is given (1x2 at (4.80, 2.20) without it, 2x2 at
+    (4.80, 3.60) with it, style guide section 8, 19 September) -- there is
+    no partial state where the IMF row exists without its own figsize.
+    """
+    _use_style(lncs)
+    has_imf = bool(imf_run_dirs)
+    if has_imf:
+        figsize = FIGSIZE_D2_LNCS if lncs else FIGSIZE_D2_DRAFT
+        nrows = 2
+    else:
+        figsize = FIGSIZE_D1_LNCS if lncs else FIGSIZE_D1_DRAFT
+        nrows = 1
+    fig, axes = plt.subplots(nrows, 2, figsize=figsize, squeeze=False, constrained_layout=False)
+
+    series_fp = _d_series_fp(run_dirs, level)
+    _plot_d_cost(axes[0, 0], series_fp, "(a)")
+    _plot_d_coverage(axes[0, 1], series_fp["cov_rows"], series_fp["outputs"], level, "(b)",
+                      width_stat=series_fp["width_stat"])
+
+    if has_imf:
+        series_imf = _d_series_imf(imf_run_dirs, level)
+        _plot_d_coverage(axes[1, 0], series_imf["cov_rows"], series_imf["coverage_outputs"],
+                          level, "(c)", width_stat=None)
+        _plot_d_sweet_spot(axes[1, 1], series_imf, "(d)")
+
+    if lncs:
+        if has_imf:
+            fig.subplots_adjust(left=0.09, right=0.80, top=0.90, bottom=0.10, hspace=0.85, wspace=1.05)
+        else:
+            fig.subplots_adjust(left=0.10, right=0.80, top=0.86, bottom=0.22, wspace=1.00)
+    else:
+        fig.subplots_adjust(left=0.07, right=0.92, top=0.93, bottom=0.10, hspace=0.5, wspace=0.5)
+
     return fig

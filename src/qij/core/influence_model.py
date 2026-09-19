@@ -59,6 +59,36 @@ At the chosen (ell, lam_c), one Cholesky of A = K_ell + lam_c*I gives
 beta, alpha, s^2 per coordinate; jitter only here, on the diagonal of A,
 escalating by powers of ten from a trace-scaled base.
 
+**The noise-to-signal ratio's floor is declared, not fitted below the
+declared level (plan §36.2(2), 19 September revision 8).** The prototype
+influences REML fits are finite differences of relative accuracy `eta`,
+so I_proto carries real evaluation noise -- noise sd sqrt(2)*eta*|T|/t_j
+at prototype j, t_j = step_parameter(delta_f, p_j), delta_f =
+forward_step(eta) -- and left unconstrained, REML happily interpolates
+that noise as signal (driving lam_c to its absolute floor 1e-10 and
+reporting the resulting wiggle as within-bin variance). Per coordinate
+c, the declared noise level is n_c^2 = 2*eta^2*theta_Q,c^2 *
+median_j(1/t_j^2), the median over j taken over coordinate c's OWN
+finite design (module docstring above); lam_c is then searched by REML
+exactly as before but on [max(lam_floor,c, 1e-10), 1e2], where
+lam_floor,c solves lam*s_c^2(lam) = n_c^2 with s_c^2(lam) the profiled
+closed form `inner` already computes. lam*s_c^2(lam) = (1/(M-m)) *
+sum_i z_i^2 * lam/(Lambda_i + lam) is increasing in lam (from the
+zero-eigenvalue directions' share of z at lam -> 0, if any, up to
+mean(z^2) at lam -> infinity), so the root is unique and is found by one
+`scipy.optimize.brentq` call on log lam, pinned to the domain's own
+edges when n_c^2 falls outside the range lam*s_c^2(lam) reaches there
+(`_lambda_floor` below) -- no iteration, no fallback search. Because
+lam*s_c^2(lam) depends on ell (through Lambda and z = V^T Qt_psi at that
+ell), the floor is recomputed once per candidate ell inside the shared
+outer search, not once for the whole fit; the final per-coordinate solve
+below simply reuses the already-floored lam_c the winning ell's `inner`
+search already found. sigma_i, v_k and psi0_hat all follow from the same
+posterior, unchanged in form. For the closed-form estimators (eta at
+machine precision) n_c^2 is negligible and the floor is inactive --
+lam_floor,c sits far below the absolute floor 1e-10 the search already
+clips to, so those coordinates are unaffected to rounding.
+
 Point uncertainty is the posterior standard deviation sigma (R&W eq.
 2.42, the affine-mean correction), computed in `uncertainty` from the
 stored Cholesky factor and G = Hb^T A^-1 Hb -- no separate evaluation.
@@ -105,13 +135,14 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy.linalg import LinAlgError, cho_factor, cho_solve
-from scipy.optimize import minimize_scalar
+from scipy.optimize import brentq, minimize_scalar
 from scipy.spatial.distance import cdist
 
+from .differences import forward_step, step_parameter
 from .xvq import XVQ
 
 _SQRT3 = math.sqrt(3.0)
-_LOG_LAM_LO = math.log(1e-10)
+_LOG_LAM_LO = math.log(1e-10)  # the absolute floor: max(lambda_floor_c, 1e-10) never searches below this
 _LOG_LAM_HI = math.log(1e2)
 _N_WIDTH_GRID = 5
 _UNCERTAINTY_BATCH_CAP = 4096
@@ -150,8 +181,9 @@ class InfluenceModel:
     whitening: Tuple[np.ndarray, np.ndarray]  # (mean, transform): raw Z -> whitened coordinates
     width: np.ndarray             # (q,) Matern-3/2 length scale ell_c; NaN on the constant path
     lam: np.ndarray               # (q,) profiled noise-to-signal ratio lam_c; NaN on the constant path
+    lam_floor: np.ndarray         # (q,) the declared-noise floor lam_floor,c at the final chosen ell (module docstring, plan sec 36.2(2)); NaN on the constant path
     s2: np.ndarray                # (q,) profiled GP signal variance s^2_c
-    at_bound: np.ndarray          # (q, 2) bool: (ell_c, lam_c) within 1% in log of its search bound
+    at_bound: np.ndarray          # (q, 2) bool: (ell_c, lam_c) within 1% in log of its search bound (lam_c's lower bound is the declared floor when it exceeds 1e-10)
     jitter: np.ndarray            # (q,) diagonal jitter added to A at the final solve; NaN on the constant path
     constant_path: np.ndarray     # (q,) bool: coordinate has no usable spread in I_proto over its own finite design
     const_value: np.ndarray       # (q,) the constant psi0 value returned on the constant path
@@ -267,16 +299,51 @@ def _within_1pct_log(x: float, lo: float, hi: float) -> bool:
     return bool(near_lo or near_hi)
 
 
+def _floor_equation(log_lam: float, z: np.ndarray, Lambda: np.ndarray, M_minus_m: int) -> float:
+    """lam * s_c^2(lam), the same profiled closed-form quantity
+    `inner`'s numerator computes (module docstring, declared noise
+    floor), as a function of lam alone: sum(z^2 * lam / (Lambda + lam))
+    / (M - m). Increasing in lam."""
+    lam = math.exp(log_lam)
+    return float(np.sum(z ** 2 * lam / (Lambda + lam)) / M_minus_m)
+
+
+def _lambda_floor(z: np.ndarray, Lambda: np.ndarray, M_minus_m: int, n_c2: float) -> float:
+    """The declared-noise floor lam_floor,c for one coordinate at one
+    candidate ell (module docstring): the unique root of
+    lam*s_c^2(lam) = n_c2 in log lam, found by one `brentq` call --
+    no iteration, no fallback search -- because `_floor_equation` is
+    increasing in lam. Pinned to the search domain's own edges,
+    [1e-10, 1e2], rather than solved outside it, since a root outside
+    that range does nothing more to `max(lam_floor_c, 1e-10)` than the
+    nearer edge already does: 1e-10 when even the smallest lam already
+    exceeds n_c2 (the declared level adds no restriction), 1e2 when
+    even the largest lam cannot reach it (the declared level swamps
+    the whole projected response and lam is pinned at the ceiling)."""
+    lo, hi = _LOG_LAM_LO, _LOG_LAM_HI
+    g_lo = _floor_equation(lo, z, Lambda, M_minus_m) - n_c2
+    if g_lo >= 0.0:
+        return math.exp(lo)
+    g_hi = _floor_equation(hi, z, Lambda, M_minus_m) - n_c2
+    if g_hi <= 0.0:
+        return math.exp(hi)
+    root = brentq(lambda x: _floor_equation(x, z, Lambda, M_minus_m) - n_c2, lo, hi)
+    return math.exp(root)
+
+
 def fit_influence_model(
-    Z: np.ndarray, xvq: XVQ, I_proto: np.ndarray, theta_Q: np.ndarray
+    Z: np.ndarray, xvq: XVQ, I_proto: np.ndarray, theta_Q: np.ndarray, eta: float
 ) -> InfluenceModel:
     """
     The initial influence estimate for every estimand coordinate:
     Gaussian-process regression with an affine mean and a Matern-3/2
     kernel (QIJ_method_outline.md step 4). `xvq.p` (prototype masses)
     and `theta_Q` (the estimator evaluated at the quantized data,
-    stage 1) are used only for the constant-response threshold; the
-    kernel-regression noise itself is unweighted.
+    stage 1) are used both for the constant-response threshold and,
+    together with `eta` (the estimator's per-evaluation relative
+    accuracy), for the declared noise floor on lam_c (module
+    docstring, plan §36.2(2)); the kernel-regression noise itself is
+    unweighted.
 
     A prototype whose evaluation failed for coordinate c is a missing
     response (module docstring): coordinate c's design is exactly the
@@ -312,6 +379,12 @@ def fit_influence_model(
     raw_centers = np.asarray(xvq.centers, dtype=float)
     d_z = raw_centers.shape[1]
 
+    # Declared noise floor (module docstring, plan §36.2(2)): delta_f is
+    # the SAME forward step `xvq.prototype_influences` used to measure
+    # I_proto, so t_j below reproduces that function's own t_j exactly,
+    # not a second way of deriving it.
+    delta_f = forward_step(eta)
+
     mean, transform = _whitening_from(Z)
     centers_full = (raw_centers - mean) @ transform.T
 
@@ -327,6 +400,7 @@ def fit_influence_model(
     beta: List[np.ndarray] = [np.empty(0, dtype=float)] * q
     width = np.full(q, np.nan, dtype=float)
     lam = np.full(q, np.nan, dtype=float)
+    lam_floor = np.full(q, np.nan, dtype=float)
     s2 = np.zeros(q, dtype=float)
     at_bound = np.zeros((q, 2), dtype=bool)
     jitter = np.full(q, np.nan, dtype=float)
@@ -385,6 +459,17 @@ def fit_influence_model(
 
         Qt_psi = {c: Q.T @ I_proto[idx_g, c] for c in cols_g}
 
+        # ---- declared noise floor, per coordinate in this group ------
+        # n_c^2 = 2*eta^2*theta_Q,c^2 * median_j(1/t_j^2) (module
+        # docstring), t_j = step_parameter(delta_f, p_j) over coordinate
+        # c's OWN finite design idx_g (the group's design, shared by
+        # every coordinate in cols_g) -- independent of ell, so computed
+        # once per group, not once per candidate ell.
+        p_g = p[idx_g]
+        t_g = np.array([step_parameter(delta_f, float(pj)) for pj in p_g])
+        inv_t2_median_g = float(np.median(1.0 / t_g ** 2))
+        n_c2_g = {c: 2.0 * eta ** 2 * float(theta_Q[c]) ** 2 * inv_t2_median_g for c in cols_g}
+
         # ---- joint outer search over log ell, within this group ------
         # One kernel and one eigendecomposition of Q^T K_ell Q per
         # width, shared across every coordinate in this group; each
@@ -396,7 +481,7 @@ def fit_influence_model(
 
         def outer_obj(log_ell: float, _trace=trace, _cols_g=cols_g,
                        _Qt_psi=Qt_psi, _Q=Q, _D_full=D_full_g,
-                       _M_minus_m=M_minus_m) -> float:
+                       _M_minus_m=M_minus_m, _n_c2=n_c2_g) -> float:
             ell = math.exp(log_ell)
             K = _matern32(_D_full, ell)
             Mproj = _Q.T @ K @ _Q
@@ -414,9 +499,22 @@ def fit_influence_model(
                     s2_val = max(s2_val, 1e-300)
                     return (_M_minus_m / 2.0) * math.log(s2_val) + 0.5 * np.sum(np.log(denom))
 
-                ir = minimize_scalar(inner, bounds=(_LOG_LAM_LO, _LOG_LAM_HI), method='bounded')
-                nll_c = float(ir.fun)
-                per_c[c] = dict(log_lam=float(ir.x), nll=nll_c)
+                # Declared noise floor (module docstring): the search
+                # for lam_c is bounded below by lam_floor,c at THIS
+                # candidate ell (Lambda, z both depend on ell), not by
+                # the absolute floor alone.
+                lam_floor_c = _lambda_floor(z, Lambda, _M_minus_m, _n_c2[c])
+                lo_bound = max(math.log(lam_floor_c), _LOG_LAM_LO)
+                if lo_bound >= _LOG_LAM_HI:
+                    # The declared floor already pins lam_c at the
+                    # ceiling: no interval left to search.
+                    log_lam_star = _LOG_LAM_HI
+                    nll_c = inner(log_lam_star)
+                else:
+                    ir = minimize_scalar(inner, bounds=(lo_bound, _LOG_LAM_HI), method='bounded')
+                    log_lam_star = float(ir.x)
+                    nll_c = float(ir.fun)
+                per_c[c] = dict(log_lam=log_lam_star, nll=nll_c, lam_floor=lam_floor_c)
                 total_nll += nll_c
 
             _trace.append(dict(log_ell=log_ell, ell=ell, K=K, per_c=per_c, nll=total_nll))
@@ -450,6 +548,7 @@ def fit_influence_model(
             t0 = time.perf_counter()
             psi_c = I_proto[idx_g, c]
             lam_c = math.exp(best['per_c'][c]['log_lam'])
+            lam_floor_final = best['per_c'][c]['lam_floor']
 
             A = K_c + lam_c * np.eye(M_g)
             chol, jit = _cholesky_with_jitter(A, K_c, M_g)
@@ -474,13 +573,17 @@ def fit_influence_model(
             m_arr[c] = m_g
             width[c] = ell_c
             lam[c] = lam_c
+            lam_floor[c] = lam_floor_final
             s2[c] = s2_c
             jitter[c] = jit
             alpha[c] = alpha_c
             beta[c] = beta_c
             n_width_evals[c] = n_shared_evals
             at_bound[c, 0] = _within_1pct_log(ell_c, ell_min, ell_max)
-            at_bound[c, 1] = _within_1pct_log(lam_c, 1e-10, 1e2)
+            # lam_c's own search bound is [max(lam_floor_final, 1e-10),
+            # 1e2] (module docstring), not the fixed [1e-10, 1e2]: the
+            # declared floor, when active, moves the lower edge.
+            at_bound[c, 1] = _within_1pct_log(lam_c, max(lam_floor_final, 1e-10), 1e2)
 
             chol_A[c] = chol
             g_chol[c] = G_chol_c
@@ -495,6 +598,7 @@ def fit_influence_model(
         whitening=(mean, transform),
         width=width,
         lam=lam,
+        lam_floor=lam_floor,
         s2=s2,
         at_bound=at_bound,
         jitter=jitter,

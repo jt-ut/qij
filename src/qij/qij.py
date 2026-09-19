@@ -95,7 +95,7 @@ class QIJ:
         # no estimation. Needed on the result for `qij_prototypes.parquet`
         # (plan's F9 measured-points product).
         W_X = np.asarray(inverse(xvq.centers), dtype=float)
-        model = fit_influence_model(Z, xvq, I_proto, theta_Q)
+        model = fit_influence_model(Z, xvq, I_proto, theta_Q, eta)
         psi0_all = _psi0(model, Z)
         sigma_all = _uncertainty(model, Z)
         wall_time_prototype = time.perf_counter() - t0
