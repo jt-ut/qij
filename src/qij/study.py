@@ -182,7 +182,19 @@ def _qij_row(s: int, outputs, res) -> dict:
     `CoordinateResult` fields and the per-coordinate influence-model
     fields (`ell`=`model.width`, `lam`=`model.lam`, the two
     `at_bound` flags). Every value is read off `res`; nothing here
-    re-derives any part of the method."""
+    re-derives any part of the method.
+
+    Three more per-output columns, `bin_mass_<o>`, `bin_influence_<o>`
+    and `bin_d2T_<o>`, each a plain Python list of length `L_<o>`
+    (pyarrow stores these as list<double>): `CoordinateResult`'s
+    `bin_mass` (p_k), `bin_influence` (that coordinate's centered
+    bin influence U_k) and `bin_d2T` (that bin's uncentered second
+    difference), i.e. the constituents of a quadratic surrogate of the
+    estimator in the bin masses. They cost kilobytes per draw and let
+    `core.intervals.qij2_interval` recompute a second-order interval
+    downstream, at any level, with NO further estimator evaluations --
+    the same spirit as this module's other products, where no interval
+    is ever stored (`core/intervals.py`'s module docstring)."""
     row = {'s': s, 'M_X': int(res.xvq.M_used), 'n_failed': int(res.n_failed)}
     for stage in ('prototype', 'full_data', 'refinement', 'total'):
         row[f'evals_{stage}'] = int(res.evals_by_stage[stage])
@@ -208,6 +220,9 @@ def _qij_row(s: int, outputs, res) -> dict:
         row[f'lam_{o}'] = float(model.lam[j])
         row[f'ell_bound_{o}'] = bool(model.at_bound[j, 0])
         row[f'lam_bound_{o}'] = bool(model.at_bound[j, 1])
+        row[f'bin_mass_{o}'] = np.asarray(c.bin_mass, dtype=float).tolist()
+        row[f'bin_influence_{o}'] = np.asarray(c.bin_influence, dtype=float).tolist()
+        row[f'bin_d2T_{o}'] = np.asarray(c.bin_d2T, dtype=float).tolist()
     return row
 
 

@@ -15,16 +15,46 @@ between term V_btw only ever rises through this; the within term
 V_win_hat is a predicted estimate from the FINAL bin set alone, not
 accumulated incrementally.
 
-The within-bin posterior variance decides WHICH bins are uncertain
-(Var_k(psi0) < mean_k sigma^2 selects a bin for the adjacency split
-instead of the level split); the CADJ graph decides HOW they divide: a
-bin's points with I_proto[bmu2[i], c] > I_proto[bmu[i], c] (the
-mass-centered prototype influence of the coordinate being refined,
-ties to "the rest") against the rest. If one side is empty, fall back
-to the level split; if that is impossible too, the bin is closed with
-g = 0. This split rule reads the marginal mean_k sigma^2 from
-`sigma_c`, per point -- deliberate and unchanged by the settled
-V_win_hat formula below.
+Revision 7 (plan §33): every bin with more than one point proposes
+BOTH a level split and an adjacency split, each with its own expected
+gain in variance units -- not a single selected candidate. The level
+split (`_try_level_split`) cuts on psi0_hat, the k-means-2 partition
+of the bin's own initial influence estimates; the CADJ adjacency
+split (`_try_adjacency_split`) instead separates the bin's points by
+which side of the boundary each point's SECOND-nearest first-stage
+prototype falls on -- a point with I_proto[bmu2[i], c] >
+I_proto[bmu[i], c] (the mass-centered prototype influence of the
+coordinate being refined) goes to one side, "the rest" to the other.
+Both candidates are tried independently and unconditionally; a bin
+can queue the level candidate, the adjacency candidate, both, or
+neither (bin closed), depending only on whether each split is
+well-defined (`_try_level_split`/`_try_adjacency_split` return None
+on a degenerate split -- fewer than 2 distinct psi0 values, k-means
+collapsing to one side, or one CADJ side empty). Neither candidate
+falls back to the other: an adjacency split that degenerates does not
+become a duplicate level candidate, and vice versa. The refinement
+loop's queue then takes the single largest expected gain over EVERY
+CANDIDATE OF EVERY OPEN BIN, not the largest per-bin gain.
+
+This replaces a prior rule (`Var_k(psi0) < mean_k sigma^2` selected
+one of the two splits per bin, sigma from `influence_model`'s
+posterior uncertainty) that measurement showed does not work: on the
+MVT tail probability estimand the adjacency split count sat at 16
+regardless of whether N was 1000 or 2000, while the prototype count
+grew 133 -> 188 and the level split count grew 18 -> 37, and
+V_btw/oracle fell from 1.0000 to 0.9131. The level split cuts on
+psi0_hat, which is nearly constant across a bin straddling a curved
+decision boundary (so a level split there buys almost nothing), and
+the adjacency split is exactly the one that resolves a straddling
+bin -- but its old sigma-based expected gain could not compete for
+the queue as sigma fell with growing N, so the split that was needed
+kept losing the auction to splits that were not. Running both
+candidates unconditionally on every bin removes that competition
+failure: the queue now compares actual expected between-variance
+gains, not a proxy that happens to shrink with N for the wrong
+reason. `sigma_c` (`influence_model`'s per-point posterior sd)
+therefore no longer enters any proposal; it is read only by the
+final `bin_posterior_variance` call, for v_k in V_win_hat below.
 
 Two failure cases, both ruled 18 September (an estimator never raises;
 a failed fit returns NaN, plan §4). Nothing is retried in either case.
@@ -99,6 +129,12 @@ from .outputs import acceleration
 
 __all__ = ["CoordinateResult", "run_refinement"]
 
+# Fixed candidate order for the refinement queue's tie-break (plan
+# §33): when two candidates of the SAME bin have exactly equal
+# expected gain, level goes first. Bins are already distinguished by
+# `id` before this key is ever consulted.
+_CANDIDATE_ORDER = {"level": 0, "adjacency": 1}
+
 
 @dataclass
 class CoordinateResult:
@@ -132,6 +168,26 @@ class CoordinateResult:
     gain_ratio          sum of realized split gains over sum of
                         expected split gains (NaN if no split was
                         taken).
+    bin_mass, bin_influence, bin_d2T
+                        (L,) float each, ordered like `labels` (index k
+                        <-> labels == k) -- the final bin set's
+                        constituents for a downstream second-order
+                        interval, which reconstructs a quadratic
+                        surrogate of the estimator in the bin masses
+                        and needs no further estimator evaluations.
+                        `bin_mass` is p_k = n_k / N. `bin_influence` is
+                        this coordinate's own U_k (U_arr[:,
+                        coordinate]) -- centered by
+                        `centering_residual`, exactly as `field` is.
+                        `bin_d2T` is the second difference each final
+                        bin carries: an initial bin (one refinement
+                        never split) keeps its own bins0.d2T[k,
+                        coordinate]; a bin CREATED by refinement
+                        inherits its PARENT's value unchanged --
+                        curvature is inherited, not re-measured, since
+                        refinement spends no evaluation that would
+                        remeasure it. `bin_d2T` is uncentered, the same
+                        convention as `ivq.BinSet.d2T`.
     M_X                 the first-stage prototype count actually used
                         (M_X_used, an input).
     M_used              the INITIAL 𝓘-VQ's bin count actually used
@@ -171,6 +227,9 @@ class CoordinateResult:
     n_adjacency_splits: int
     rho: float
     gain_ratio: float
+    bin_mass: np.ndarray
+    bin_influence: np.ndarray
+    bin_d2T: np.ndarray
     M_X: int
     M_used: int
     n_refine_evals: int
@@ -220,7 +279,9 @@ def _try_adjacency_split(
     both already resolved to live prototypes; the mass-centered
     prototype influence of the coordinate being refined) against the
     rest; ties (equal, or b2 == b) go to "the rest". None if one side
-    is empty (the caller falls back to the level split).
+    is empty -- the bin then simply has no adjacency candidate (plan
+    §33, revision 7: it does NOT fall back to the level split; see
+    `propose`).
 
     Harmless by construction if a prototype's own influence could not be
     evaluated (the companion 18 September ruling for stage 1): `I_proto_c`
@@ -232,8 +293,8 @@ def _try_adjacency_split(
     evaluation of `T`, and the variance decomposition is computed from
     those measurements, not from `diff`. So an arbitrary side for a few
     points can only make a split slightly worse at its job (and a
-    degenerate split already falls back to the level split) -- it cannot
-    make any reported number wrong.
+    degenerate split simply yields no adjacency candidate for that bin)
+    -- it cannot make any reported number wrong.
     """
     diff = I_proto_c[bmu2[idx]] - I_proto_c[bmu[idx]]
     mask = diff > 0.0
@@ -245,15 +306,26 @@ def _try_adjacency_split(
 def _degenerate_result(coordinate: int, name: str, N: int, bins0: BinSet, M_X_used: int) -> CoordinateResult:
     """One bin, no evaluations, V_btw = V_win_hat = B_hat = 0, field 0
     (the coordinate's constant path, or an initial quantizer with
-    M_used <= 1)."""
+    M_used <= 1). This function returns before `bin_differences` is
+    ever called, so `bins0.U`/`bins0.d2T` are still the (M_used, 0)
+    placeholders `build_bins` leaves them at -- there is no per-
+    coordinate influence or curvature to read. `bin_influence` and
+    `bin_d2T` therefore report 0.0 for the single synthetic bin, the
+    same "no evaluations happened" convention as `field`/`V_btw`/
+    `V_win_hat`/`B_hat`; `bin_mass` is exactly 1.0 (the one bin holds
+    every point, by construction of `labels` below)."""
     field = np.zeros(N, dtype=float)
     labels = np.zeros(N, dtype=int)
+    bin_mass = np.array([1.0], dtype=float)
+    bin_influence = np.zeros(1, dtype=float)
+    bin_d2T = np.zeros(1, dtype=float)
     return CoordinateResult(
         coordinate=coordinate, name=name,
         V_btw=0.0, V_win_hat=0.0, V_tot_hat=0.0, B_hat=0.0,
         a_bca=acceleration(field), field=field, labels=labels,
         L=1, n_level_splits=0, n_adjacency_splits=0,
         rho=float('nan'), gain_ratio=float('nan'),
+        bin_mass=bin_mass, bin_influence=bin_influence, bin_d2T=bin_d2T,
         M_X=M_X_used, M_used=bins0.M_used, n_refine_evals=0,
     )
 
@@ -271,14 +343,27 @@ def _failed_result(coordinate: int, name: str, N: int, bins0: BinSet, M_X_used: 
     reported on this result. Nothing is retried. `failed=True` marks
     this coordinate for `qij.py`, which voids every coordinate's
     variance quantities on the draw when any one of them failed here
-    (plan §4: a failed initial-bin evaluation NaNs the whole draw)."""
+    (plan §4: a failed initial-bin evaluation NaNs the whole draw).
+
+    `bin_mass`/`bin_influence`/`bin_d2T` split the same way as the
+    rest of this result: `bin_mass` is a partition fact that stage 2
+    genuinely established before the failure (bins0.n / N, kept, like
+    `labels`/`L`/`M_used`), while `bin_influence`/`bin_d2T` are outputs
+    of the differencing that FAILED, so they are read straight off
+    `bins0.U`/`bins0.d2T` at coordinate `coordinate` -- already
+    NaN-filled, (M_used, q) arrays, by `ivq.bin_differences` on this
+    same failure."""
     field = np.full(N, np.nan, dtype=float)
+    bin_mass = bins0.n.astype(float) / N
+    bin_influence = np.asarray(bins0.U[:, coordinate], dtype=float)
+    bin_d2T = np.asarray(bins0.d2T[:, coordinate], dtype=float)
     return CoordinateResult(
         coordinate=coordinate, name=name,
         V_btw=float('nan'), V_win_hat=float('nan'), V_tot_hat=float('nan'),
         B_hat=float('nan'), a_bca=acceleration(field), field=field, labels=bins0.labels,
         L=bins0.M_used, n_level_splits=0, n_adjacency_splits=0,
         rho=float('nan'), gain_ratio=float('nan'),
+        bin_mass=bin_mass, bin_influence=bin_influence, bin_d2T=bin_d2T,
         M_X=M_X_used, M_used=bins0.M_used, n_refine_evals=0,
         failed=True,
     )
@@ -358,7 +443,13 @@ def run_refinement(
         leaves[next_id] = dict(
             id=next_id, indices=idx, n=int(idx.size),
             U=np.asarray(bins0.U[k], dtype=float).copy(),
-            open=True, split=None, g=0.0, gamma=1.0,
+            # Curvature is measured once, at the initial bins, and
+            # never re-measured by refinement (plan §33 change 2): an
+            # initial leaf seeds its own d2T here; a bin created by a
+            # later split inherits its parent's value unchanged (see
+            # the split branch below).
+            d2T=float(bins0.d2T[k, coordinate]),
+            open=True, candidates=[], gamma=1.0,
         )
         next_id += 1
 
@@ -383,56 +474,84 @@ def run_refinement(
         return (V_btw / denom) if denom != 0.0 else float('nan')
 
     def propose(leaf: dict, rho2_current: float) -> None:
-        """Compute the bin's proposed split and expected gain g, using
-        `rho2_current` (the rho^2 in force when the bin was created)."""
+        """Compute the bin's candidate splits and their expected gains
+        (plan §33, revision 7): BOTH a level and an adjacency
+        candidate, independently -- not a selection between them.
+        `rho2_current` is the rho^2 in force when the bin was created
+        (frozen into each candidate's gain at proposal time, exactly
+        as the old single-candidate gain was).
+
+        LEVEL candidate (`_try_level_split`, unchanged): the
+        between-children variance of psi0_hat over the bin,
+        mass-weighted --
+
+            g_level = rho2 * (p_a*ubar_a^2 + p_b*ubar_b^2
+                               - p_k*ubar_k^2) / N
+
+        ADJACENCY candidate (`_try_adjacency_split`, unchanged split
+        rule; new gain): a mean OVER THE BIN'S POINTS of the SQUARE of
+        half the absolute prototype-influence difference between each
+        point's second- and first-nearest prototype -- a mean of
+        squares, paralleling the retired mean_sigma2_k it replaces,
+        NOT the square of a mean --
+
+            g_adj = rho2 * p_k * mean_{i in k}[(0.5 * abs(
+                        I_proto_c[bmu2[i]] - I_proto_c[bmu[i]]))^2] / N
+
+        computed with a NaN-ignoring mean so a prototype whose own
+        influence could not be evaluated (diff NaN at that point) does
+        not poison the bin's gain. In practice this branch never sees
+        an all-NaN bin: `_try_adjacency_split` already needs at least
+        one point with diff > 0.0 (hence non-NaN, since NaN > 0.0 is
+        False) to return a split at all, so an all-NaN bin fails there
+        first and never reaches the gain calculation -- it is closed
+        with no adjacency candidate, which is the same outcome the
+        NaN-ignoring mean would give it directly. The guard below is
+        kept anyway, so the rule ("all-NaN bin -> gain 0.0, no
+        candidate") is stated where it is used and the calculation
+        cannot raise `np.nanmean`'s empty-slice warning if that
+        invariant is ever broken.
+
+        Neither candidate falls back to the other on degeneracy --
+        each is simply omitted when its `_try_*_split` returns None.
+        A bin with neither candidate is closed (`leaf['open'] =
+        False`)."""
         idx = leaf['indices']
         n_k = leaf['n']
-        if n_k <= 1:
-            leaf['open'] = False
-            leaf['split'] = None
-            leaf['g'] = 0.0
-            return
+        candidates = []
 
-        psi_leaf = psi0_c[idx]
-        sigma_leaf = sigma_c[idx]
-        var_k = _variance(psi_leaf)
-        mean_sigma2_k = float(np.mean(sigma_leaf ** 2))
-        p_k = n_k / N
-        ubar_k = leaf_ubar(leaf)
-        rho2_local = rho2_current if np.isfinite(rho2_current) else 0.0
+        if n_k > 1:
+            psi_leaf = psi0_c[idx]
+            p_k = n_k / N
+            ubar_k = leaf_ubar(leaf)
+            rho2_local = rho2_current if np.isfinite(rho2_current) else 0.0
 
-        if var_k >= mean_sigma2_k:
-            split = _try_level_split(idx, psi_leaf)
-            if split is None:
-                leaf['open'] = False
-                leaf['split'] = None
-                leaf['g'] = 0.0
-                return
-            idx_a, idx_b = split
-            ubar_a = float(psi_centered[idx_a].mean())
-            ubar_b = float(psi_centered[idx_b].mean())
-            p_a = idx_a.size / N
-            p_b = idx_b.size / N
-            g = (rho2_local * (p_a * ubar_a ** 2 + p_b * ubar_b ** 2 - p_k * ubar_k ** 2)) / N
-            leaf['split'] = ('level', idx_a, idx_b)
-            leaf['g'] = g
-            leaf['open'] = True
-        else:
-            split = _try_adjacency_split(idx, I_proto_c, bmu, bmu2)
-            kind = 'adjacency'
-            if split is None:
-                split = _try_level_split(idx, psi_leaf)
-                kind = 'level'
-            if split is None:
-                leaf['open'] = False
-                leaf['split'] = None
-                leaf['g'] = 0.0
-                return
-            idx_a, idx_b = split
-            g = (rho2_local * p_k * mean_sigma2_k) / N
-            leaf['split'] = (kind, idx_a, idx_b)
-            leaf['g'] = g
-            leaf['open'] = True
+            level_split = _try_level_split(idx, psi_leaf)
+            if level_split is not None:
+                idx_a, idx_b = level_split
+                ubar_a = float(psi_centered[idx_a].mean())
+                ubar_b = float(psi_centered[idx_b].mean())
+                p_a = idx_a.size / N
+                p_b = idx_b.size / N
+                g_level = (rho2_local * (p_a * ubar_a ** 2 + p_b * ubar_b ** 2 - p_k * ubar_k ** 2)) / N
+                candidates.append(('level', g_level, idx_a, idx_b))
+
+            adj_split = _try_adjacency_split(idx, I_proto_c, bmu, bmu2)
+            if adj_split is not None:
+                diff = I_proto_c[bmu2[idx]] - I_proto_c[bmu[idx]]
+                sq = (0.5 * np.abs(diff)) ** 2
+                if np.all(np.isnan(sq)):
+                    # Unreachable given adj_split is not None (see
+                    # docstring); defensive only.
+                    pass
+                else:
+                    mean_sq = float(np.nanmean(sq))
+                    g_adj = (rho2_local * p_k * mean_sq) / N
+                    idx_a2, idx_b2 = adj_split
+                    candidates.append(('adjacency', g_adj, idx_a2, idx_b2))
+
+        leaf['candidates'] = candidates
+        leaf['open'] = len(candidates) > 0
 
     rho2 = compute_rho2()
     for leaf in leaves.values():
@@ -444,14 +563,27 @@ def run_refinement(
         if not open_leaves:
             break
         tau = eps * V_btw / len(leaves)
-        best = min(open_leaves, key=lambda l: (-l['g'], l['id']))
-        if not (best['g'] >= tau):
+
+        # The queue ranges over every (bin, candidate) pair of every
+        # open bin (plan §33: two candidates per bin, not one), and
+        # takes the single largest expected gain among all of them --
+        # not the largest per-bin gain. Tie-break, fully deterministic:
+        # descending gain, then ascending bin id (the old per-bin
+        # tie-break), then a fixed candidate order -- level before
+        # adjacency (`_CANDIDATE_ORDER`) -- for the rare case of an
+        # exact tie between one bin's own two candidates.
+        pairs = [(leaf, cand) for leaf in open_leaves for cand in leaf['candidates']]
+        best_leaf, best_candidate = min(
+            pairs,
+            key=lambda pair: (-pair[1][1], pair[0]['id'], _CANDIDATE_ORDER[pair[1][0]]),
+        )
+        kind, g_expected, idx_a, idx_b = best_candidate
+        if not (g_expected >= tau):
             break
         if n_refine_evals >= evals_cap:
             break
 
         tau_at_selection = tau
-        kind, idx_a, idx_b = best['split']
         if idx_a.size <= idx_b.size:
             idx_small, idx_large = idx_a, idx_b
         else:
@@ -470,16 +602,22 @@ def run_refinement(
         if np.any(np.isnan(T_small)):
             # Case 2 (ruled 18 September): this split's own evaluation
             # failed. Cancel it -- the parent stays a bin and is
-            # CLOSED, so the loop does not try it again; `counter`
-            # already counted the failure (`Counter.failed`). Nothing
-            # is retried, and the rest of the refinement proceeds
-            # normally -- one failed split does not spoil the draw.
-            best['open'] = False
+            # CLOSED, so the loop does not try it again. With two
+            # candidates per bin (plan §33) this still closes the
+            # WHOLE BIN, not just the candidate that failed: there is
+            # only one evaluation (on the winning candidate's small
+            # side), so the other candidate is never separately
+            # tested and there is nothing left to propose from this
+            # bin. `counter` already counted the failure
+            # (`Counter.failed`). Nothing is retried, and the rest of
+            # the refinement proceeds normally -- one failed split
+            # does not spoil the draw.
+            best_leaf['open'] = False
             continue
 
         U_small = (T_small - theta_hat) / t_small - bins0.centering_residual
-        p_parent = best['n'] / N
-        U_parent = best['U']
+        p_parent = best_leaf['n'] / N
+        U_parent = best_leaf['U']
         U_large = (p_parent * U_parent - p_small * U_small) / p_large
 
         Delta = (
@@ -490,23 +628,28 @@ def run_refinement(
 
         V_btw += Delta
         sum_measured_delta += Delta
-        sum_expected_g += best['g']
+        sum_expected_g += g_expected
         if kind == 'level':
             n_level_splits += 1
         else:
             n_adjacency_splits += 1
 
-        gamma_children = _split_gamma(Delta, best['g'])
+        gamma_children = _split_gamma(Delta, g_expected)
 
-        del leaves[best['id']]
+        # Curvature is inherited from the parent, not re-measured
+        # (plan §33 change 2): both children of this split carry the
+        # SAME d2T the parent bin carried.
+        parent_d2T = best_leaf['d2T']
+
+        del leaves[best_leaf['id']]
 
         leaf_small = dict(
             id=next_id, indices=idx_small, n=int(idx_small.size),
-            U=U_small, open=True, split=None, g=0.0, gamma=gamma_children,
+            U=U_small, d2T=parent_d2T, open=True, candidates=[], gamma=gamma_children,
         )
         leaf_large = dict(
             id=next_id + 1, indices=idx_large, n=int(idx_large.size),
-            U=U_large, open=True, split=None, g=0.0, gamma=gamma_children,
+            U=U_large, d2T=parent_d2T, open=True, candidates=[], gamma=gamma_children,
         )
         next_id += 2
         leaves[leaf_small['id']] = leaf_small
@@ -555,6 +698,16 @@ def run_refinement(
         U_arr[new_id] = leaf['U']
         ubar_arr[new_id] = leaf_ubar(leaf)
 
+    # The interval's constituents (plan §33 change 2): the final bin
+    # set's mass, this coordinate's own influence, and the second
+    # difference each bin carries, ordered like `labels_final` so a
+    # downstream second-order interval can reconstruct a quadratic
+    # surrogate of the estimator in the bin masses with no further
+    # estimator evaluations.
+    bin_mass = np.array([leaves[old_id]['n'] / N for old_id in ordered_ids], dtype=float)
+    bin_d2T = np.array([leaves[old_id]['d2T'] for old_id in ordered_ids], dtype=float)
+    bin_influence = U_arr[:, coordinate].copy()
+
     if np.isfinite(rho):
         field = U_arr[labels_final, coordinate] + rho * (psi_centered - ubar_arr[labels_final])
     else:
@@ -566,5 +719,6 @@ def run_refinement(
         B_hat=float(B_hat0), a_bca=acceleration(field), field=field, labels=labels_final,
         L=L, n_level_splits=n_level_splits, n_adjacency_splits=n_adjacency_splits,
         rho=float(rho), gain_ratio=float(gain_ratio),
+        bin_mass=bin_mass, bin_influence=bin_influence, bin_d2T=bin_d2T,
         M_X=M_X_used, M_used=bins0.M_used, n_refine_evals=n_refine_evals,
     )
