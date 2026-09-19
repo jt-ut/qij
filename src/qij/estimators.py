@@ -591,19 +591,38 @@ class IMF:
         self.tau = float(tau)
         self.bounds = tuple((float(lo), float(hi)) for lo, hi in bounds)
 
+    # How close to an end of its own interval a parameter has to sit to
+    # count as resting on it, as a fraction of that interval's width.
+    _BOX_TOL = 1e-4
+
     def _at_box(self, params: np.ndarray) -> bool:
         """True when any of the three free (alpha, Mstar, p) parameters
-        lies within `eta` -- the estimator's own declared accuracy, 1e-6 --
-        of either end of its own bound interval. A fit that runs to a
-        bound is not a stationary point of the objective (the weighted
-        score there is not zero), so it is not a root of anything and
-        neither the fit nor its influence means anything there (plan
-        Sec 4 ruling): the box stays, but the evaluation becomes a
-        counted failure like any other, not a silent number."""
+        lies within `_BOX_TOL` of its own interval's WIDTH of either end.
+        A fit that runs to a bound is not a stationary point of the
+        objective (the weighted score there is not zero), so it is not a
+        root of anything and neither the fit nor its influence means
+        anything there (plan Sec 4 ruling): the box stays, but the
+        evaluation becomes a counted failure like any other, not a silent
+        number.
+
+        The tolerance is a fraction of the box width, not `eta`. It was
+        `eta * (1 + |bound|)` -- the estimator's own declared accuracy --
+        and that is the wrong scale: it measures how precisely the
+        objective is evaluated, not how close to an active bound the
+        optimizer actually parks. On the S=1000 main run seventeen IMF
+        draws ran p to its upper bound of 20 and stopped between 4.8e-5
+        and 2.0e-4 short of it, against a tolerance of 2.1e-5. The guard
+        caught none of them, so seventeen fits that rest on the
+        constraint were scored as ordinary draws, with QIJ reporting a
+        variance of 3e-8 (correctly: at an active bound the fit is
+        locally constant in the data weights, so the influence vanishes)
+        and an interval of essentially no width that misses with
+        certainty. 1e-4 of the width is 2.0e-3 on p, which catches all
+        seventeen with four orders of magnitude to spare before the
+        nearest interior fit."""
         for v, (lo, hi) in zip(params, self.bounds):
-            if abs(v - lo) <= self.eta * (1.0 + abs(lo)):
-                return True
-            if abs(v - hi) <= self.eta * (1.0 + abs(hi)):
+            tol = self._BOX_TOL * (hi - lo)
+            if abs(v - lo) <= tol or abs(v - hi) <= tol:
                 return True
         return False
 
