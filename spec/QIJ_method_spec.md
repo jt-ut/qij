@@ -1,4 +1,4 @@
-# QIJ method specification, revision 8 (19 September 2026)
+# QIJ method specification, revision 9 (19 September 2026)
 
 **Purpose.** This is the document a reviewer checks the `qij` package against. It states the method as ruled, every formula with its conventions, every edge-case rule, the invariants that hold on the products, and which module implements which step. Where the code and this document disagree, that is a finding; where this document is silent, the code has no licence to add behaviour. Terms and symbols follow `QIJ_glossary.md` in this folder; subscripts i for data points, j for 𝒳-VQ prototypes, k for 𝓘-VQ bins, c for estimator outputs. The dated history of how the method was reached (`QIJ_revision_plan.md`, §1–§36) is not needed to review the code.
 
@@ -54,7 +54,7 @@ two evaluations on N rows per bin, always in the order +t then −t. The downwar
 
 **3.5 The FD-to-prediction scale.** ψ̃₀(x_i) = ψ̂₀(x_i) − mean_i ψ̂₀; ψ̄₀,k = mean of ψ̃₀ over bin k; ρ² = V_btw / ((1/N) Σ_k p_k ψ̄₀,k²), recomputed over the current bins after every accepted split.
 
-**3.6 Refinement** (revision 8; one proposal per bin). Bins are leaves; each leaf carries its mass, its U (all q columns), its Δ²T, its γ (1 for an initial bin) and an open flag. Cost guard: at most 1 + M_𝒳 refinement evaluations. τ = ε V_btw / (current number of leaves), recomputed each iteration.
+**3.6 Refinement** (revision 8; one proposal per bin). Bins are leaves; each leaf carries its mass, its U (all q columns), its Δ²T, its γ (1 for an initial bin), an open flag and the closing flag below. Cost guard: at most 1 + M_𝒳 refinement evaluations. τ = ε V_btw / (current number of leaves), recomputed each iteration.
 
 - **Proposal** for an open leaf with more than one point, using v_k (§2.5) for that leaf:
   - level split if Var_k(ψ̂₀) > v_k: two-means (the §3.2 quantizer at M = 2) on the leaf's ψ̂₀ values; children a, b; expected gain ĝ = ρ² (p_a ψ̄₀,a² + p_b ψ̄₀,b² − p_k ψ̄₀,k²)/N with ψ̄₀ the means of ψ̃₀;
@@ -62,7 +62,7 @@ two evaluations on N rows per bin, always in the order +t then −t. The downwar
   A leaf with one point, or with no valid proposal, is closed.
 - **Queue.** Take the open leaf with the largest ĝ (ties: lower leaf id). Stop when ĝ < τ or the cost guard is reached.
 - **Measurement.** The smaller child s (ties: side a) is stepped by δ_f: t_s = δ_f p_s/(1 − p_s), one evaluation on N rows; U_s = [T(ω(t_s)) − θ̂]/t_s − r (the stored centring residual, all q columns); the larger child by mass balance U_l = (p_k U_k − p_s U_s)/p_l. Realized gain g = (p_s U_s,c² + p_l U_l,c² − p_k U_k,c²)/N; V_btw += g. Both children inherit the parent's Δ²T. γ for both children = clip(g/ĝ, 0, 1) when ĝ > 0 and both are finite, else 1.
-- **Closing.** If g < τ (the τ at selection) both children are closed; otherwise ρ² is recomputed and both children receive proposals. A failed evaluation cancels the split: the parent stays, closed, its evaluation counted (§5.2).
+- **Closing (revision 9).** Each leaf carries a flag, clear on the initial bins. If g ≥ τ (the τ at selection) both children have the flag clear, ρ² is recomputed and both receive proposals. If g < τ and the parent's flag is clear, both children have the flag set and are likewise re-proposed. If g < τ and the parent's flag is set, both children are closed. One below-tolerance split cannot distinguish a bin with constant influence from one whose variation was divided evenly between its children; a second consecutive one can. A failed evaluation cancels the split: the parent stays, closed, its evaluation counted (§5.2).
 - Products: L leaves; n_level, n_adjacency; the sequence sums Σg and Σĝ, reported as the gain ratio Σg/Σĝ (NaN if Σĝ = 0).
 
 ---

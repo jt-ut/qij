@@ -248,7 +248,7 @@ Set `figsize` to the exact final inches, set fonts to the exact final points, sa
 | full width, single panel | `(4.80, 2.80)` | F4, F7 |
 | full width, 2x2 panels | `(4.80, 3.60)` | F3, one panel per DGP |
 | half width | `(2.32, 2.00)` | 4 mm gutter |
-| full width, 2x3 panels | `(4.80, 3.00)` | the final six-coordinate figures B (influence) and C (cost), 19 Sept 2026: three panels across at about 1.4 in each after gutters, two rows of near-square panels; figure A (accuracy, 1x3 with six rows) uses `(4.80, 2.20)` |
+| full width, 2x3 panels | `(4.80, 3.00)` | the final six-coordinate figures B (influence) and C (cost), 19 Sept 2026: three panels across at about 1.4 in each after gutters, two rows of near-square panels; figure A (accuracy): two panels (coverage, width ratio), six rows, two markers per row; its size and layout are set by the author directly with the coder (19 Sept 2026), not by this guide |
 
 ### Fonts at 4.8 in
 

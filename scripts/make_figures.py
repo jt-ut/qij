@@ -31,12 +31,15 @@ import re
 from qij import figures
 
 
-def _save(fig, out_dir: str, name: str, lncs: bool) -> None:
-    suffix = "_lncs" if lncs else ""
+def _save(fig, out_dir: str, name: str) -> None:
     figures_dir = os.path.join(out_dir, "figures")
     os.makedirs(figures_dir, exist_ok=True)
-    path = os.path.join(figures_dir, f"{name}{suffix}.pdf")
+    # Both formats, every time: the PDF is what the paper includes at 1:1,
+    # the PNG is what gets looked at and passed around. They are the same
+    # figure at the same size, so a comment on one applies to the other.
+    path = os.path.join(figures_dir, f"{name}.pdf")
     fig.savefig(path)
+    fig.savefig(os.path.join(figures_dir, f"{name}.png"), dpi=300)
     print(f"saved {path}")
 
 
@@ -61,7 +64,6 @@ def _cost_dirs(root: str) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("run_dir", help="products directory from qij.study (e.g. a main or smoke run)")
-    parser.add_argument("--lncs", action="store_true", help="render at LNCS final size instead of the draft size")
     parser.add_argument("--timing-dir", type=str, default=None,
                         help="the one-worker, one-thread timing run, for Figure C's corner wall times")
     parser.add_argument("--cost-vs-n", type=str, default=None,
@@ -73,21 +75,21 @@ def main() -> None:
                              "(use a scratch directory for a smoke rendering)")
     args = parser.parse_args()
 
-    fig_a = figures.fig_a(args.run_dir, lncs=args.lncs)
-    _save(fig_a, args.out_dir or args.run_dir, "fig_a", args.lncs)
+    fig_a = figures.fig_a(args.run_dir)
+    _save(fig_a, args.out_dir or args.run_dir, "fig_a")
 
-    fig_b = figures.fig_b(args.run_dir, lncs=args.lncs)
-    _save(fig_b, args.out_dir or args.run_dir, "fig_b", args.lncs)
+    fig_b = figures.fig_b(args.run_dir)
+    _save(fig_b, args.out_dir or args.run_dir, "fig_b")
 
     if args.timing_dir:
-        fig_c = figures.fig_c(args.run_dir, args.timing_dir, lncs=args.lncs)
-        _save(fig_c, args.out_dir or args.run_dir, "fig_c", args.lncs)
+        fig_c = figures.fig_c(args.run_dir, args.timing_dir)
+        _save(fig_c, args.out_dir or args.run_dir, "fig_c")
 
     if args.cost_vs_n:
         cost_dirs = _cost_dirs(args.cost_vs_n)
         imf_cost_dirs = _cost_dirs(args.cost_vs_n_imf) if args.cost_vs_n_imf else None
-        fig_d = figures.fig_d(cost_dirs, imf_run_dirs=imf_cost_dirs, lncs=args.lncs)
-        _save(fig_d, args.out_dir or args.cost_vs_n, "fig_d", args.lncs)
+        fig_d = figures.fig_d(cost_dirs, imf_run_dirs=imf_cost_dirs)
+        _save(fig_d, args.out_dir or args.cost_vs_n, "fig_d")
 
 
 if __name__ == "__main__":
