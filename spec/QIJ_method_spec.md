@@ -1,4 +1,4 @@
-# QIJ method specification, revision 9 (19 September 2026)
+# QIJ method specification, revision 10 (20 September 2026)
 
 **Purpose.** This is the document a reviewer checks the `qij` package against. It states the method as ruled, every formula with its conventions, every edge-case rule, the invariants that hold on the products, and which module implements which step. Where the code and this document disagree, that is a finding; where this document is silent, the code has no licence to add behaviour. Terms and symbols follow `QIJ_glossary.md` in this folder; subscripts i for data points, j for 𝒳-VQ prototypes, k for 𝓘-VQ bins, c for estimator outputs. The dated history of how the method was reached (`QIJ_revision_plan.md`, §1–§36) is not needed to review the code.
 
@@ -12,7 +12,7 @@
 
 **The method sees T only through the counter** (`core/counter.py`): every evaluation is counted with its row count, and any evaluation returning a NaN is counted as failed. Nothing else of T is reachable. T never raises; a failed fit returns NaN. T holds no randomness and does not know which method calls it.
 
-**Output** (`QIJResult`), per output c: V_btw, V̂_win, V̂_tot = V_btw + V̂_win, B̂, â_BCa, and the interval h^{QIJ}_q at any level, computed on demand from θ̂, V̂_tot and â_BCa and never stored. Diagnostics per output: L, the numbers of level and adjacency splits, ρ, the realized-to-expected gain ratio, ℓ, λ, whether either sits on its search bound, the refinement evaluation count, the final bins' constituents (p_k, U_k, Δ²T_k), each point's bin label and refined influence. Shared: M_𝒳, θ_Q (the stage-1 value; never reported as an estimate), evaluations and rows by stage, wall time by stage, the failed-evaluation count.
+**Output** (`QIJResult`), per output c: V_btw, and the interval h^{QIJ}_q at any level, computed on demand from θ̂ and V_btw and never stored; as diagnostics, V̂_win, V̂_tot = V_btw + V̂_win, B̂ and â_BCa. Diagnostics per output: L, the numbers of level and adjacency splits, ρ, the realized-to-expected gain ratio, ℓ, λ, whether either sits on its search bound, the refinement evaluation count, the final bins' constituents (p_k, U_k, Δ²T_k), each point's bin label and refined influence. Shared: M_𝒳, θ_Q (the stage-1 value; never reported as an estimate), evaluations and rows by stage, wall time by stage, the failed-evaluation count.
 
 **Cost.** Stage 1: 1 + M_𝒳 evaluations on M_𝒳 rows. Stage 2: 1 evaluation on N rows, then per output 2·M_𝓘,c evaluations on N rows for the initial bins and at most 1 + M_𝒳 refinement evaluations on N rows. Nothing is ever retried. Nothing in the method is computed by resampling.
 
@@ -30,13 +30,13 @@
 
 **2.5 The initial influence estimate.** Z is whitened by its own mean and covariance (the transform derived from Z once and stored). Per output c, a Gaussian process on that output's finite prototypes: I_j = h(w_j)ᵀβ + f(w_j) + e_j, h(z) = (1, z) in whitened coordinates (constant-only when the finite design has at most d_z + 2 points), f ~ GP(0, s² k_ℓ) with the Matérn-3/2 kernel k_ℓ(r) = (1 + √3 r/ℓ) exp(−√3 r/ℓ) on whitened distance, e_j ~ N(0, s² λ) homoscedastic.
 
-- **Width ℓ** is shared by all outputs that share the same finite design (all of them when no prototype failed), searched on [ℓ_min, ℓ_max] with ℓ_min the median whitened distance between CADJ-connected prototypes and ℓ_max ten times the largest inter-prototype distance: five log-spaced widths, then one bounded scalar search between the best grid point's neighbours; the objective is the sum over the group's outputs of the profiled restricted negative log marginal likelihood (REML: the affine basis projected out by an orthonormal complement Q, one eigendecomposition of QᵀK_ℓQ per width shared across the group).
+- **Width ℓ** is shared by all outputs that share the same finite design (all of them when no prototype failed), searched on [ℓ_min, ℓ_max] with ℓ_min the median whitened distance between CADJ-connected prototypes and ℓ_max ten times the largest inter-prototype distance: five log-spaced widths, then one bounded scalar search between the best grid point's neighbours, **skipped when the best grid point is the upper endpoint** (revision 10: beyond about ℓ_max the Matérn-3/2 family with the affine mean projected out collapses to one fixed kernel, the r³ polyharmonic spline, so ℓ is unidentified there and the search would climb a log-determinant tilt that changes nothing a reader sees); the objective is the sum over the group's outputs of the profiled restricted negative log marginal likelihood (REML: the affine basis projected out by an orthonormal complement Q, one eigendecomposition of QᵀK_ℓQ per width shared across the group).
 - **Noise-to-signal ratio λ_c**, per output, at each candidate width: s_c² is profiled in closed form, s_c²(λ) = (1/(M − m)) Σ_i z_i²/(Λ_i + λ), and λ_c minimizes the profiled REML objective by a bounded search of log λ on [log max(λ_floor,c, 10⁻¹⁰), log 10²].
 - **The declared noise floor (revision 8).** The prototype influences are differences of evaluations of accuracy η, so their noise standard deviation at prototype j is √2·η·|θ_Q,c|/t_j. The declared homoscedastic level is n_c² = 2 η² θ_Q,c² · median_j(1/t_j²) over the output's finite design. λ_floor,c is the unique root of λ·s_c²(λ) = n_c² (the left side, (1/(M − m)) Σ_i z_i² λ/(Λ_i + λ), is increasing in λ), found by one bracketed root find on log λ and pinned to the nearer edge of [10⁻¹⁰, 10²] when the equation has no root inside it. The floor is recomputed at every candidate width. For an estimator with η at machine precision the floor lies below 10⁻¹⁰ and the search is unchanged.
 - At the chosen (ℓ, λ_c): one Cholesky of A = K_ℓ + λ_c I (jitter only here, escalating 0 → 10⁻¹⁰ tr(K)/M → ×10 → ×10; a fourth failure raises and the draw is recorded as failed), giving β_c, α_c = A⁻¹(I − Hβ_c), s_c².
 - **Predictions at every data point:** ψ̂₀(x_i) = h(z_i)ᵀβ_c + k_iᵀα_c; σ_i² = s_c² [1 − k_iᵀA⁻¹k_i + r_iᵀG⁻¹r_i] with r_i = h(z_i) − HᵀA⁻¹k_i and G = HᵀA⁻¹H, clipped at 0. The **within-bin posterior variance** of a set K of points is v_K = mean(diag Σ_K) − mean(Σ_K), Σ_K the posterior covariance of f + hᵀβ over K, computed from bin-summed vectors (the double sums over K accumulated in row chunks), never by forming the |K| × |K| block.
 - **Constant path.** An output whose finite design has fewer than 3 prototypes, or whose mass-weighted spread of I_j is at most 10⁻¹⁰ |θ_Q,c|, has no model: it is a collapsed stage 1 and the output fails under §5.3.
-- Reported: ℓ, λ_c, and whether each sits within 1% in log of its search bound (for λ_c the lower bound is the floored one).
+- Reported: ℓ, λ_c, and whether each sits within 1% in log of its search bound (for λ_c the lower bound is the floored one). On the closed-form estimators λ_c sits at the absolute floor 10⁻¹⁰ on every draw (the model interpolates exact derivatives, as it should); on the IMF it sits on the declared floor. ℓ sits at ℓ_max on every draw of the FP and the MVT tail and most of the MVT ν, and never on the Pareto or the IMF; ℓ_max = 10 × the largest inter-prototype distance is a noisy bound, but any ℓ on the plateau gives the same model, so the flag is cosmetic.
 
 ---
 
@@ -50,7 +50,7 @@
   U_k = [T(ω(+t_k)) − T(ω(−t_k))]/(2 t_k),   Δ²T_k = [T(ω(+t_k)) − 2θ̂ + T(ω(−t_k))]/t_k²,
 two evaluations on N rows per bin, always in the order +t then −t. The downward step is feasible whenever δ ≤ 1 (every member weight is multiplied by 1 − δ ≥ 0), which holds for every η ≤ 1/3; the one-sided second-order stencil at +t, +2t is the rule's stated fallback and does not fire. *(The older method outline said one-sided; the central stencil is what is built and what this specification rules.)* U_k carries all q outputs; only column c is used for output c. Centring: r_c = Σ_k p_k U_k,c is subtracted from every U_k,c and stored as the centring residual; Δ²T is not centred. A bin's measurement is complete before the next bin's begins; a NaN in any U_k or Δ²T_k stops the loop (§5.2).
 
-**3.4 Between-bin term and bias term** over the initial bins: V_btw = (1/N) Σ_k p_k U_k², B̂ = (1/2N) Σ_k p_k Δ²T_k.
+**3.4 Between-bin term and bias term** over the initial bins: V_btw = (1/N) Σ_k p_k U_k², B̂ = (1/2N) Σ_k p_k (1 − p_k) Δ²T_k (the trace ½ tr(D Σ) with Σ = (diag(p) − ppᵀ)/N and D = diag(Δ²T); the −p_k² term was omitted before 19 September, a 3% relative error on every coordinate, immaterial to intervals, corrected here).
 
 **3.5 The FD-to-prediction scale.** ψ̃₀(x_i) = ψ̂₀(x_i) − mean_i ψ̂₀; ψ̄₀,k = mean of ψ̃₀ over bin k; ρ² = V_btw / ((1/N) Σ_k p_k ψ̄₀,k²), recomputed over the current bins after every accepted split.
 
@@ -72,10 +72,10 @@ two evaluations on N rows per bin, always in the order +t then −t. The downwar
 - **V_btw** = (1/N) Σ_k p_k U_k,c² over the L final bins (equal to the running value).
 - **V̂_win** = ρ² (1/N) Σ_{k: n_k > 1} p_k γ_k [Var_k(ψ̂₀) + v_k], with Var_k the population variance of ψ̂₀ over the bin and v_k the within-bin posterior variance of the final bin.
 - **V̂_tot** = V_btw + V̂_win.
-- **B̂** = (1/2N) Σ_k p_k Δ²T_k over the final bins (identical to the initial-bin value, since children inherit Δ²T and their masses sum to the parent's). Reported, not applied.
+- **B̂** = (1/2N) Σ_k p_k (1 − p_k) Δ²T_k over the final bins (identical to the initial-bin value, since children inherit Δ²T and their masses sum to the parent's). Reported, not applied.
 - **Refined influence estimate** ψ̂(x_i) = U_{k(i),c} + ρ (ψ̃₀(x_i) − ψ̄₀,k(i)).
 - **Acceleration** â_BCa = mean(ψ̂³) / (6 √N mean(ψ̂²)^{3/2}).
-- **The QIJ interval** at level q: z = Φ⁻¹((1 ± q)/2), adjusted z' = z/(1 − â z), h = θ̂ + z' √max(V̂_tot, 0). Median-bias constant zero. The interval is a pure function of (θ̂, V̂_tot, â_BCa, q) and is recomputed wherever needed.
+- **The QIJ interval** (revision 10, 20 September 2026) at level q: h = θ̂ ± z_{(1+q)/2} √V_btw, the normal interval on the measured between-bin variance. The within-bin remainder is bounded by the declared tolerance ε through the bin count and the refinement's stopping rule, so it is not estimated into the interval. Everything else stays in the products as diagnostics and is not part of the interval: V̂_win (whether the tolerance was met), â_BCa (the skew correction; changed coverage by ≤ 0.003 on the eleven test estimands), B̂ (reported, not applied), and the natural-support clip (never acted). Ablation on the products, plan §36.15. The interval is a pure function of (θ̂, V_btw, q) and is recomputed wherever needed.
 - **The bootstrap comparator** (`bootstrap.py`): B multinomial weight vectors (N, 1/N) from `default_rng(seed)`, one at a time; replicates T(X, ω_b); the percentile interval from the finite replicates at any level and any prefix b ≤ B; a replicate with any NaN counts as failed.
 - Nothing else is an output. In particular no second-order interval, no sampler, no interval computed from resampled quantities of any kind exists in the package.
 
@@ -87,11 +87,11 @@ two evaluations on N rows per bin, always in the order +t then −t. The downwar
 
 **5.2 Stage 2.** A NaN in any initial bin's stencil: that output's measurement stops at that bin, nothing further is measured, and the output fails; the failure voids the whole draw (§5.4). A NaN in a refinement evaluation: the split is cancelled, the parent bin stays and is closed, the evaluation and the failure are counted, the refinement continues.
 
-**5.3 Collapsed stage 1 (revision 8).** An output on the constant path (§2.5) or with M_𝓘,c ≤ 1 is a **failed** output: V_btw, V̂_win, V̂_tot, B̂, â_BCa NaN, refined influence NaN, L = 1 with all points in one bin, no refinement. A zero-variance result is never produced.
+**5.3 Collapsed stage 1 (revision 8).** An output on the constant path (§2.5) or with M_𝓘,c ≤ 1 is a **failed** output: V_btw, V̂_win, V̂_tot, B̂, â_BCa NaN, refined influence NaN, L = 1 with all points in one bin, no refinement. A zero-variance result is never produced. **Failure test downstream (revision 10):** a QIJ draw is failed when its stored V_btw is not finite, or when L = 1 with V_btw = 0 (products written before revision 8); never through the interval's arithmetic.
 
 **5.4 The draw.** If any output failed under §5.2 or §5.3, every output's five variance quantities are set to NaN; the diagnostics that genuinely happened (counts, wall times, L, labels) stand. The draw counts as a failed QIJ draw for every output.
 
-**5.5 Bounded estimators (revision 8).** Any estimator with a box or bracket returns NaN when a fitted parameter rests within 10⁻⁴ of the box width of either edge, in the coordinates the search walks in (log ν for the multivariate-t degrees of freedom on its bracket [0.1, 10⁶]; the IMF's three bounded parameters directly). The box is never narrowed. This holds for every caller, so a bootstrap replicate and a QIJ evaluation fail under the same test.
+**5.5 Bounded estimators (revision 8).** Any estimator with a box or bracket returns NaN when a fitted parameter rests within 10⁻⁴ of the box width of either edge, in the coordinates the search walks in (log ν for the multivariate-t degrees of freedom on its bracket [0.1, 10⁶]; the Chabrier IMF fit's three parameters (m_c, σ_m, x) directly on their search box). The box is never narrowed. This holds for every caller, so a bootstrap replicate and a QIJ evaluation fail under the same test.
 
 **5.6 Nothing is retried, cached, warm-started or given a second start.** Every evaluation depends on its own (X, ω) only.
 
@@ -118,14 +118,14 @@ For every draw with a finite result (exact arithmetic identities hold to 10⁻¹
 1. Σ_k bin_mass = 1; len(bin_mass) = L; bin_mass·N are integers.
 2. Σ_k bin_mass_k · bin_influence_k = 0 (the centring survives every split by mass balance).
 3. (1/N) Σ_k bin_mass_k · bin_influence_k² = V_btw.
-4. (1/2N) Σ_k bin_mass_k · bin_d2T_k = B_hat.
+4. (1/2N) Σ_k bin_mass_k (1 − bin_mass_k) · bin_d2T_k = B_hat (products written before 19 September carry the uncorrected value; recompute from the constituents).
 5. V_tot_hat = V_btw + V_win_hat, V_win_hat ≥ 0, V_btw ≥ 0.
 6. n_level_splits + n_adjacency_splits = L − M_𝓘,c ≤ n_refine_evals ≤ 1 + M_X (M_𝓘,c ≤ 17 at the default; cancelled splits spend an evaluation without adding a bin).
 7. evals_prototype = 1 + M_X and rows_prototype = (1 + M_X)·M_X; evals_full_data = 1 + 2 Σ_c M_𝓘,c; evals_refinement = Σ_c n_refine_evals; rows_full_data = N·evals_full_data; rows_refinement = N·evals_refinement; normalized_rows = rows_total/N.
-8. A draw with NaN in any of V_btw, V_win_hat, V_tot_hat, B_hat, a_bca for one output has NaN in all five for every output. No row has L = 1 together with V_btw = 0 (a collapsed stage 1 is NaN, revision 8).
+8. A draw with NaN in any of V_btw, V_win_hat, V_tot_hat, B_hat, a_bca for one output has NaN in all five for every output. No row has L = 1 together with V_btw = 0 (a collapsed stage 1 is NaN, revision 8); a downstream reader treats either as failed (§5.3).
 9. lam ≥ 10⁻¹⁰; for an estimator with η at machine precision, lam at 10⁻¹⁰ is the search floor and lam_bound is true whenever lam is within 1% in log of it.
 10. On the designated draw: Σ_j p_j = 1 and Σ_j p_j I_j = 0 over finite j (prototypes); the mean of psi_hat over each final bin equals bin_influence_k; psi_hat − bin_influence_{bin_label} = ρ·(psi0 − mean(psi0) − ψ̄₀,k) pointwise; ρ² = V_btw / ((1/N) Σ_k p_k ψ̄₀,k²) with ψ̄₀,k the bin means of centred psi0.
-11. The interval at 0.95 recomputed from (theta_hat, V_tot_hat, a_bca) by §4 reproduces the table's coverage exactly.
+11. The interval at 0.95 recomputed from (theta_hat, V_btw) by §4 reproduces the table's coverage exactly.
 12. The one check in the package (`python -m qij.check`): for the weighted mean, whose influence is x_i − θ̂ exactly, on the pipeline's own final bins, Σ_k p_k ψ̄_k² + Σ_k p_k Var_k(ψ) = (1/N) Σ_i ψ_i² to machine precision. This is the only verification code in the package.
 
 Statistical expectations on the study (not identities; for the reviewer's orientation only): on estimators with a smooth influence V_btw/V_oracle is 0.98–1.00 and the coverage of h^{QIJ} at 0.95 is within two standard errors of nominal; on a needle-like influence (a small tail probability in many dimensions) V_btw sits below the oracle and the interval under-covers, which the paper reports as the method's limit.

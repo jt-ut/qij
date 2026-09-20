@@ -306,7 +306,12 @@ def _load_draws(estimator_dir: str, outputs: list) -> dict:
     product regardless of what reads them, plan §36.2 ruling 6) --
     nothing here loads them, and the merge below is indifferent to a
     source frame carrying extra columns, so a run that has them and a
-    run that does not load identically."""
+    run that does not load identically. `L_<output>` IS loaded (added
+    revision 10): `_qij_ok`, the failure test downstream (plan
+    §36.17(1); spec §5.3's last sentence), needs it alongside
+    `theta_hat`/`v_btw` to catch the pre-revision-8 collapsed shape
+    (`L == 1`, `V_btw == 0.0`), which the normal interval on `V_btw`
+    can no longer be relied on to turn non-finite on its own."""
     truth = pd.read_parquet(os.path.join(estimator_dir, "truth.parquet"))
     qij_df = pd.read_parquet(os.path.join(estimator_dir, "qij.parquet"))
     df = truth.merge(qij_df, on="s", how="inner")
@@ -332,6 +337,7 @@ def _load_draws(estimator_dir: str, outputs: list) -> dict:
         theta_true=df[[f"theta_true_{o}" for o in outputs]].to_numpy(),
         theta_hat=df[[f"theta_hat_{o}" for o in outputs]].to_numpy(),
         v_btw=df[[f"V_btw_{o}" for o in outputs]].to_numpy(),
+        L=df[[f"L_{o}" for o in outputs]].to_numpy(),
         v_tot_hat=df[[f"V_tot_hat_{o}" for o in outputs]].to_numpy(),
         a_bca=df[[f"a_bca_{o}" for o in outputs]].to_numpy(),
         theta_boot=theta_boot,
@@ -351,6 +357,33 @@ def _load_draws(estimator_dir: str, outputs: list) -> dict:
 # directly, so there is exactly one place doing the per-draw loop.
 # ---------------------------------------------------------------------------
 
+def _qij_ok(theta_hat, v_btw, L):
+    """The failure test downstream (revision 10; plan §36.17(1), 20
+    September 2026; `QIJ_method_spec.md` §5.3's last sentence): a draw
+    is QIJ-usable for one output when its stored `theta_hat` and
+    `V_btw` are both finite and it is not the pre-revision-8 collapsed
+    shape, `L == 1` with `V_btw` the literal stored `0.0` (not a small
+    number, so the comparison is exact -- products written before
+    revision 8 store that value, never something merely close to it).
+    The `theta_hat` conjunct is not a second convention: invariant 8
+    and §5.4 already guarantee that a draw whose full-data fit failed
+    has `V_btw` NaN too, so on every product this package reads it
+    never changes which draws pass -- it is here only so a malformed
+    product cannot hand a draw to the comparison set with an undefined
+    coverage outcome for one of the two methods. This tests the stored
+    fields directly, never the interval's own arithmetic: the point of
+    the rule is that `qij_interval`'s `theta_hat +/- z sqrt(V_btw)` is
+    finite even on the collapsed shape (a normal interval has no
+    denominator to blow up the way BCa's `z / (1 - a z)` did), so a
+    downstream reader that kept testing `isfinite(lo) & isfinite(hi)`
+    would silently start scoring a certain miss as a valid, zero-width
+    interval. Works on scalars or arrays alike, elementwise."""
+    theta_hat = np.asarray(theta_hat, dtype=float)
+    v_btw = np.asarray(v_btw, dtype=float)
+    L = np.asarray(L)
+    return np.isfinite(theta_hat) & np.isfinite(v_btw) & ~((L == 1) & (v_btw == 0))
+
+
 def _qij_lo_hi(loaded: dict, j: int, level: float) -> np.ndarray:
     """(n, 2) [lo, hi] for output index `j`, over every draw in `loaded`,
     at `level`, from `core.intervals.qij_interval`: the normal interval
@@ -360,15 +393,21 @@ def _qij_lo_hi(loaded: dict, j: int, level: float) -> np.ndarray:
     under 0.6% of the total variance, the median |a_bca| between 0.0002
     and 0.037, and the clip changing no endpoint on any draw (see
     `core.intervals.qij_interval`). A draw whose `theta_hat`/`V_btw` is
-    not both finite for this output (a box-rule or QIJ-side failure,
-    plan §36.2 ruling 5) is left NaN rather than passed in --
-    `qij_interval` would produce NaN from it anyway, but the finiteness
-    check is made explicit here rather than relied on implicitly."""
+    not both finite for this output, OR that is the pre-revision-8
+    collapsed shape (`L == 1` with `V_btw` the stored `0.0`), is left
+    NaN rather than passed in -- the failure test downstream (revision
+    10; plan §36.17(1); spec §5.3's last sentence), applied here through
+    `_qij_ok`. The third clause matters precisely because the first two
+    no longer catch it on their own: `qij_interval` on a collapsed
+    row's finite `theta_hat` and zero `V_btw` returns the finite
+    degenerate interval `[theta_hat, theta_hat]`, not NaN, so a figure
+    that only checked `isfinite(lo) and isfinite(hi)` would draw a
+    failed draw as a zero-width bar instead of leaving it out."""
     n = loaded["theta_hat"].shape[0]
     lo_hi = np.full((n, 2), np.nan)
     for i in range(n):
-        th, v = loaded["theta_hat"][i, j], loaded["v_btw"][i, j]
-        if np.isfinite(th) and np.isfinite(v):
+        th, v, l = loaded["theta_hat"][i, j], loaded["v_btw"][i, j], loaded["L"][i, j]
+        if _qij_ok(th, v, l):
             lo_hi[i] = qij_interval(np.array([th]), np.array([v]), level)[0]
     return lo_hi
 
@@ -385,7 +424,7 @@ def _boot_lo_hi(loaded: dict, j: int, level: float, b: int = None) -> np.ndarray
     return lo_hi
 
 
-def _comparison_mask(lo_hi_qij: np.ndarray, lo_hi_boot: np.ndarray) -> np.ndarray:
+def _comparison_mask(loaded: dict, j: int, lo_hi_boot: np.ndarray) -> np.ndarray:
     """(n,) boolean: True for a draw where BOTH methods' intervals are
     finite -- the comparison-set ruling (figure spec, "Comparison set";
     plan §36.11, 19 September 2026). A draw whose full-data fit failed
@@ -394,12 +433,27 @@ def _comparison_mask(lo_hi_qij: np.ndarray, lo_hi_boot: np.ndarray) -> np.ndarra
     converged replicates on that same draw (an IMF box-rule draw, e.g.
     s = 936, is exactly this case); a draw where QIJ's stage-1 collapsed,
     or where the bootstrap has no converged replicate at all, is dropped
-    the same way. This is the conjunction of the SAME finiteness test
-    `_coverage_se` already applies to each method's own interval, not a
-    second convention -- every site here that compares the two methods
-    (`_coverage_pair`, `_width_ratio`, Figure C's curve/point/floor)
-    calls this once rather than re-deriving the test."""
-    qij_ok = np.isfinite(lo_hi_qij[:, 0]) & np.isfinite(lo_hi_qij[:, 1])
+    the same way. The QIJ side is `_qij_ok` on `loaded`'s own stored
+    `theta_hat`/`v_btw`/`L` for output `j`, not the finiteness of a
+    `lo_hi_qij` array built for this call -- the failure test downstream
+    (revision 10; plan §36.17(1); spec §5.3's last sentence) rules that
+    a QIJ draw is failed by its stored fields and never by the
+    interval's own arithmetic, since the current normal interval turns
+    the pre-revision-8 collapsed shape (`L == 1`, `V_btw == 0.0`) into
+    the finite degenerate interval `[theta_hat, theta_hat]` that the old
+    BCa interval's arithmetic used to fail on its own. The bootstrap
+    side is unchanged, still the finiteness of `lo_hi_boot` -- that is
+    the right test for it, since `percentile_interval` has no analogous
+    collapsed shape to mistake for a valid one. The two sides still
+    agree with what `_coverage_se` would separately mark defined for
+    each method on every product this package reads (no row with
+    `L == 1`, `V_btw == 0.0` exists after revision 8, invariant 8), so
+    this changes no reported number here, only what the test would do
+    on an old-shape product. Every site here that compares the two
+    methods (`_coverage_pair`, `_width_ratio`, Figure C's
+    curve/point/floor) calls this once rather than re-deriving the
+    test."""
+    qij_ok = _qij_ok(loaded["theta_hat"][:, j], loaded["v_btw"][:, j], loaded["L"][:, j])
     boot_ok = np.isfinite(lo_hi_boot[:, 0]) & np.isfinite(lo_hi_boot[:, 1])
     return qij_ok & boot_ok
 
@@ -432,7 +486,7 @@ def _coverage_pair(loaded: dict, j: int, level: float) -> tuple:
     and scores an interval on a draw whose full-data fit failed)."""
     lo_hi_qij = _qij_lo_hi(loaded, j, level)
     lo_hi_boot = _boot_lo_hi(loaded, j, level)
-    common = _comparison_mask(lo_hi_qij, lo_hi_boot)
+    common = _comparison_mask(loaded, j, lo_hi_boot)
     theta_true = np.where(common, loaded["theta_true"][:, j], np.nan)
     return _coverage_se(theta_true, lo_hi_qij), _coverage_se(theta_true, lo_hi_boot)
 
@@ -446,7 +500,7 @@ def _width_ratio(loaded: dict, j: int, level: float) -> np.ndarray:
     rather than two conventions that merely happen to agree."""
     lo_hi_qij = _qij_lo_hi(loaded, j, level)
     lo_hi_boot = _boot_lo_hi(loaded, j, level)
-    common = _comparison_mask(lo_hi_qij, lo_hi_boot)
+    common = _comparison_mask(loaded, j, lo_hi_boot)
     w_qij = lo_hi_qij[:, 1] - lo_hi_qij[:, 0]
     w_boot = lo_hi_boot[:, 1] - lo_hi_boot[:, 0]
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -1284,11 +1338,14 @@ def fig_c(run_dir: str) -> plt.Figure:
 
         # The comparison set, fixed ONCE from each method's full result: a
         # draw on which either method has no interval is dropped for both
-        # (plan §36.11). Taken from the full-B bootstrap, never from a
-        # prefix's own interval, so the curve is over one population at every
-        # point along it rather than a moving one.
-        common = _comparison_mask(_qij_lo_hi(loaded, j, _LEVEL),
-                                  _boot_lo_hi(loaded, j, _LEVEL))
+        # (plan §36.11). QIJ's side reads `loaded`'s own stored fields
+        # through `_comparison_mask`/`_qij_ok`, never a `lo_hi_qij`
+        # array's finiteness (the failure test downstream, revision 10;
+        # plan §36.17(1); spec §5.3's last sentence). The bootstrap side
+        # is taken from the full-B bootstrap, never from a prefix's own
+        # interval, so the curve is over one population at every point
+        # along it rather than a moving one.
+        common = _comparison_mask(loaded, j, _boot_lo_hi(loaded, j, _LEVEL))
 
         # The reference is the TRUE 95% interval itself -- [q2.5, q97.5] of
         # theta_hat over the draws -- scored against theta_true. Its width is

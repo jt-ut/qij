@@ -158,7 +158,18 @@ def _compute_intervals(loaded, level):
     `core.intervals.qij_interval` for why each came out); `v_tot_hat`
     and `a_bca` are still loaded, and T1 still reports `V_tot_hat`
     against the oracle and Monte Carlo variances, but neither enters an
-    interval. Loop over draws only (<= S), never over N."""
+    interval. After the row-by-row call, every (draw, output) `_qij_ok`
+    (below) marks failed is overwritten to NaN `[lo, hi]` -- the
+    failure test downstream (revision 10; plan §36.17(1), 20 September
+    2026; `QIJ_method_spec.md` §5.3's last sentence). `qij_interval` on
+    its own cannot tell a genuinely failed draw from the pre-revision-8
+    collapsed shape (`L == 1`, `V_btw == 0.0`): the normal interval
+    turns that shape's finite `theta_hat` and zero half-width into a
+    finite, degenerate `[theta_hat, theta_hat]`, not the non-finite
+    result the old BCa interval used to produce from it. Left unmasked,
+    that row would count as a draw certain to hit rather than a failed
+    one, and a figure would draw it as a zero-width bar. Loop over
+    draws only (<= S), never over N."""
     theta_hat = loaded["theta_hat"]
     n, q = theta_hat.shape
     qij_lo_hi = np.full((n, q, 2), np.nan)
@@ -166,6 +177,7 @@ def _compute_intervals(loaded, level):
     for i in range(n):
         qij_lo_hi[i] = qij_interval(theta_hat[i], loaded["v_btw"][i], level)
         bootstrap_lo_hi[i] = percentile_interval(loaded["theta_bootstrap"][i], level)
+    qij_lo_hi[~_qij_ok(theta_hat, loaded["v_btw"], loaded["L"])] = np.nan
     return qij_lo_hi, bootstrap_lo_hi
 
 
@@ -203,7 +215,34 @@ def _coverage_se(indicator):
     return p, se, n
 
 
-def _comparison_mask(qij_lo_hi, bootstrap_lo_hi):
+def _qij_ok(theta_hat, v_btw, L):
+    """The failure test downstream (revision 10; plan §36.17(1), 20
+    September 2026; `QIJ_method_spec.md` §5.3's last sentence): a draw
+    is QIJ-usable for one output when its stored `theta_hat` and
+    `V_btw` are both finite and it is not the pre-revision-8 collapsed
+    shape, `L == 1` with `V_btw` the literal stored `0.0` (not a small
+    number, so the comparison is exact -- products written before
+    revision 8 store that value, never something merely close to it).
+    The `theta_hat` conjunct is not a second convention: invariant 8
+    and §5.4 already guarantee that a draw whose full-data fit failed
+    has `V_btw` NaN too, so on every product this package reads it
+    never changes which draws pass -- it is here only so a malformed
+    product cannot hand a draw to the comparison set with an undefined
+    coverage outcome for one of the two methods. This tests the stored
+    fields directly, never the interval's own arithmetic: the point of
+    the rule is that `qij_interval`'s `theta_hat +/- z sqrt(V_btw)` is
+    finite even on the collapsed shape (a normal interval has no
+    denominator to blow up the way BCa's `z / (1 - a z)` did), so a
+    downstream reader that kept testing `isfinite(lo) & isfinite(hi)`
+    would silently start scoring a certain miss as a valid, zero-width
+    interval. Vectorized: any shape, elementwise."""
+    theta_hat = np.asarray(theta_hat, dtype=float)
+    v_btw = np.asarray(v_btw, dtype=float)
+    L = np.asarray(L)
+    return np.isfinite(theta_hat) & np.isfinite(v_btw) & ~((L == 1) & (v_btw == 0))
+
+
+def _comparison_mask(loaded, bootstrap_lo_hi):
     """(n, q) boolean: True for a (draw, output) where BOTH methods'
     intervals are finite -- the comparison-set ruling (figure spec,
     "Comparison set"; plan §36.11, 19 September 2026). A draw whose
@@ -212,15 +251,27 @@ def _comparison_mask(qij_lo_hi, bootstrap_lo_hi):
     form and score one from its own converged replicates (an IMF box-
     rule draw, e.g. s = 936, is exactly this case); a draw where QIJ's
     stage-1 collapsed, or where the bootstrap has no converged replicate
-    at all, is dropped the same way. This is the conjunction of the SAME
-    finiteness test `_covered` already applies to each method on its
-    own -- not a second convention -- so a (draw, output) this marks
-    usable is exactly one where `_covered` returns a defined 0/1 for
-    both methods, never NaN for either. Called once here and once more
-    from `coverage_grid`; every column the ruling names (coverage of
-    both methods, the width ratio, `n_coverage`) is built by masking
-    with this, nowhere by re-deriving the test."""
-    qij_ok = np.isfinite(qij_lo_hi[..., 0]) & np.isfinite(qij_lo_hi[..., 1])
+    at all, is dropped the same way. The QIJ side is `_qij_ok` on
+    `loaded`'s own stored `theta_hat`/`v_btw`/`L`, not the finiteness of
+    a `qij_lo_hi` array built for this call -- the failure test
+    downstream (revision 10; plan §36.17(1); spec §5.3's last sentence)
+    rules that a QIJ draw is failed by its stored fields and never by
+    the interval's own arithmetic, since the current normal interval
+    turns the pre-revision-8 collapsed shape (`L == 1`, `V_btw == 0.0`)
+    into the finite degenerate interval `[theta_hat, theta_hat]` that
+    the old BCa interval's arithmetic used to fail on its own. The
+    bootstrap side is unchanged, still the finiteness of
+    `bootstrap_lo_hi` -- that is the right test for it, since
+    `percentile_interval` has no analogous collapsed shape to mistake
+    for a valid one. The two sides still agree with what `_covered`
+    would separately mark defined for each method on every product this
+    package reads (no row with `L == 1`, `V_btw == 0.0` exists after
+    revision 8, invariant 8), so this changes no reported number here,
+    only what the test would do on an old-shape product. Called once
+    here and once more from `coverage_grid`; every column the ruling
+    names (coverage of both methods, the width ratio, `n_coverage`) is
+    built by masking with this, nowhere by re-deriving the test."""
+    qij_ok = _qij_ok(loaded["theta_hat"], loaded["v_btw"], loaded["L"])
     boot_ok = np.isfinite(bootstrap_lo_hi[..., 0]) & np.isfinite(bootstrap_lo_hi[..., 1])
     return qij_ok & boot_ok
 
@@ -283,34 +334,56 @@ def t1(run_dir):
     `n_qij_failed` and `qij_failure_fraction` close that gap directly,
     per output, by testing the thing coverage actually depends on
     rather than a proxy for it: a draw counts as QIJ-failed here
-    exactly when `qij_interval`'s own `[lo, hi]` is non-finite for that
-    output -- i.e. exactly the draws `cov_qij` (below) already marks
-    NaN, whether it was `theta_hat` or `V_btw` that was NaN. Testing
-    the interval, not a proxy such as `L == 1 and V_btw == 0`, counts
-    every cause without a branch per cause and without double-counting
-    a draw that is NaN by both routes at once (there is only one route
-    once the interval itself is the test).
+    exactly when `_qij_ok` (the failure test downstream, revision 10;
+    plan §36.17(1), 20 September 2026; `QIJ_method_spec.md` §5.3's last
+    sentence) is false for that output -- stored `theta_hat` not
+    finite, stored `V_btw` not finite, or `L == 1` with `V_btw` the
+    literal stored `0.0`. This is a test on the STORED FIELDS, never on
+    `qij_interval`'s own `[lo, hi]`. Under the BCa interval this table
+    used through 19 September the two amounted to the same thing, since
+    BCa's `z / (1 - a z)` turned a collapsed row's undefined
+    acceleration into a non-finite interval on its own; the normal
+    interval on `V_btw` does not do that -- a collapsed row's zero
+    half-width and finite `theta_hat` give the finite, degenerate
+    interval `[theta_hat, theta_hat]`, which reading the interval's
+    arithmetic would count as a (certainly missing) draw that happens
+    to look like a valid one. Testing the stored fields directly, not
+    the interval, counts every cause without a branch per cause and
+    without double-counting a draw that is NaN by both routes at once
+    (there is only one route once the stored fields themselves are the
+    test).
 
-    One consequence of the 20 September interval change (the normal
-    interval on `V_btw`; `core.intervals.qij_interval`) is worth
-    stating, because it is a difference in what this column would count
-    on an OLD product. A run written before the collapsed-stage-1 fix
-    stored a collapsed draw as `L = 1`, `V_btw = V_win_hat = V_tot_hat
-    = B_hat = 0.0`, `a_bca = NaN`, and the BCa adjustment turned that
-    undefined acceleration into a non-finite interval, so the draw was
-    counted failed. Under the new form the same row gives the finite
-    degenerate interval `[theta_hat, theta_hat]`, which would be
-    counted as a (certainly missing) draw instead. No such row exists
-    in the products this tables: a run written after the fix stores
-    `V_btw`/`V_tot_hat`/`a_bca` all NaN directly (plan §36.2 ruling 4),
-    which is still NaN `[lo, hi]`, and on the main run the same three
-    MVT nu draws are excluded before and after.
+    This is exactly why the rule must read the stored fields rather
+    than the interval: the difference is invisible on the products this
+    package tables (no row here has `L == 1` with `V_btw == 0.0`; see
+    below), but it would not be invisible on a run built before the
+    collapsed-stage-1 fix (before revision 8), and a test written
+    against the interval's arithmetic would silently give the wrong
+    answer the moment such a run was tabled. That older shape stored a
+    collapsed draw as `L = 1`, `V_btw = V_win_hat = V_tot_hat = B_hat =
+    0.0`, `a_bca = NaN`; under the BCa interval this table used through
+    19 September, the undefined acceleration turned that into a
+    non-finite interval, so the draw was counted failed by the old
+    interval-arithmetic test too, coincidentally. Under the normal
+    interval on `V_btw`, the same row gives the finite degenerate
+    interval `[theta_hat, theta_hat]`, and an interval-arithmetic test
+    would count it as a (certainly missing) draw that looks valid --
+    exactly the wrong answer. `_qij_ok`'s `L == 1 and V_btw == 0` clause
+    catches it regardless of which interval form is in use, which is
+    the whole point of testing the stored fields instead. No such row
+    exists in the products this tables: a run written after the fix
+    stores `V_btw`/`V_tot_hat`/`a_bca` all NaN directly (plan §36.2
+    ruling 4), which both tests already agree is failed, and on the
+    main run the same three MVT nu draws are excluded before and after.
 
-    `n_qij_failed` is built from the exact same finiteness mask
-    `cov_qij` uses, so `n_draws - n_qij_failed` equals `n_qij`
-    (`_coverage_se(cov_qij[:, j])`'s own valid count) by construction,
-    for every row, on both product shapes -- but that count is QIJ's
-    own, and is no longer what `n_coverage` reports (see below).
+    `n_qij_failed` is built directly from `_qij_ok`, not from
+    `cov_qij`'s own NaN pattern -- on every product this package reads
+    the two agree exactly, `n_draws - n_qij_failed` equal to the count
+    of finite entries in `cov_qij[:, j]`, since `_compute_intervals`
+    masks `qij_lo_hi` by the same `_qij_ok` before `cov_qij` is ever
+    built (invariant 8: no row has `L == 1` with `V_btw == 0.0` here).
+    That count is QIJ's own, and is no longer what `n_coverage` reports
+    (see below).
 
     SUPERSEDED BY THE COMPARISON-SET RULING (figure spec, "Comparison
     set"; plan §36.11, 19 September 2026). The paragraph above, and the
@@ -448,8 +521,10 @@ def t1(run_dir):
         # width ratio are never averaged over two differently sized sets
         # of draws. `common` masks `cov_qij`/`cov_bootstrap`/`width_ratio`
         # alike; `cov_qij`/`cov_bootstrap` themselves (unmasked) stay
-        # around only for `n_qij_failed` below, QIJ's own diagnostic.
-        common = _comparison_mask(qij_lo_hi, bootstrap_lo_hi)
+        # around for `cov_qij_common`/`cov_bootstrap_common` below --
+        # `n_qij_failed` further down is built straight from `_qij_ok`
+        # on `loaded`, not from `cov_qij`.
+        common = _comparison_mask(loaded, bootstrap_lo_hi)
         cov_qij_common = np.where(common, cov_qij, np.nan)
         cov_bootstrap_common = np.where(common, cov_bootstrap, np.nan)
 
@@ -474,13 +549,20 @@ def t1(run_dir):
 
         for j, output in enumerate(outputs):
             # QIJ's own failure diagnostic (plan §36.2 ruling 5, UNCHANGED
-            # by the comparison-set ruling): every draw whose QIJ interval
-            # is non-finite for this output, whatever produced it -- the
-            # same mask `cov_qij[:, j]`'s own NaNs already carry, computed
-            # from the UNMASKED `cov_qij`, so `n_qij_failed` counts QIJ's
-            # own construction alone, not the comparison with the bootstrap.
-            _p_qij_own, _se_qij_own, n_qij = _coverage_se(cov_qij[:, j])
-            n_qij_failed = n_draws - n_qij
+            # by the comparison-set ruling): every draw that fails the
+            # failure test downstream (revision 10; plan §36.17(1); spec
+            # §5.3's last sentence) for this output, whatever produced
+            # it. Built straight from `_qij_ok` on `loaded`'s own
+            # `theta_hat`/`v_btw`/`L`, never from `cov_qij`'s NaN pattern
+            # -- the ruling's "never through the interval's arithmetic"
+            # applies to this diagnostic exactly as it does to
+            # `_comparison_mask`, even though the two agree on every
+            # draw this package reads (no row has `L == 1` with
+            # `V_btw == 0.0` after revision 8, invariant 8), so
+            # `n_qij_failed` counts QIJ's own construction alone, not
+            # the comparison with the bootstrap.
+            n_qij_ok_j = _qij_ok(loaded["theta_hat"][:, j], loaded["v_btw"][:, j], loaded["L"][:, j])
+            n_qij_failed = n_draws - int(np.sum(n_qij_ok_j))
 
             # Reported coverage/width columns: the common set only
             # (comparison-set ruling, docstring above). `cov_qij_common`
@@ -550,12 +632,14 @@ def coverage_grid(run_dir):
 
     Comparison-set ruling (figure spec, "Comparison set"; plan §36.11):
     applied PER (dataset, estimator, output, level) -- `_comparison_mask`
-    on that coordinate's own `qij_lo_hi`/`bootstrap_lo_hi` at this level
-    -- before the coordinate's draws are ravelled into the pool, not
-    after pooling. Both methods are therefore masked to the identical
-    set at every coordinate they are pooled from, so `n_qij` and
-    `n_bootstrap` below come out equal: the pooled COMMON count, not two
-    separately sized pools that happen to share a name.
+    on that coordinate's own `loaded` (the failure test downstream,
+    revision 10, plan §36.17(1), spec §5.3's last sentence, read off
+    `loaded`'s stored `theta_hat`/`v_btw`/`L`) and `bootstrap_lo_hi` at
+    this level -- before the coordinate's draws are ravelled into the
+    pool, not after pooling. Both methods are therefore masked to the
+    identical set at every coordinate they are pooled from, so `n_qij`
+    and `n_bootstrap` below come out equal: the pooled COMMON count, not
+    two separately sized pools that happen to share a name.
     """
     run_dir = Path(run_dir)
     config = yaml.safe_load((run_dir / "config.yaml").read_text())
@@ -573,7 +657,7 @@ def coverage_grid(run_dir):
         pooled_bootstrap = []
         for loaded in loaded_by_dir:
             qij_lo_hi, bootstrap_lo_hi = _compute_intervals(loaded, level)
-            common = _comparison_mask(qij_lo_hi, bootstrap_lo_hi)
+            common = _comparison_mask(loaded, bootstrap_lo_hi)
             cov_qij = np.where(common, _covered(loaded["theta_true"], qij_lo_hi), np.nan)
             cov_bootstrap = np.where(common, _covered(loaded["theta_true"], bootstrap_lo_hi), np.nan)
             pooled_qij.append(cov_qij.ravel())
@@ -593,7 +677,7 @@ def coverage_grid(run_dir):
 # Cost table
 # ---------------------------------------------------------------------------
 
-def cost_table(run_dir, timing_dir):
+def cost_table(run_dir):
     """
     The cost table (plan section 8), one row per (dataset, estimator),
     with the three cost layers in separate, explicitly labelled
@@ -608,13 +692,27 @@ def cost_table(run_dir, timing_dir):
 
     L1 (evaluation counts, exact and machine-independent) is read from
     `run_dir`'s qij.parquet (evals_total, normalized_rows, medians over
-    draws) and boot.h5 (its replicate count B). L2 (wall time) is only
-    the ratio QIJ/bootstrap within the same draw on the same worker,
-    median over `run_dir`'s draws -- never an absolute duration. L3
-    (absolute seconds) is read only from `timing_dir` (the one-worker,
-    one-thread timing run, plan section 7), medians of its own
-    wall_time_total (QIJ) and boot.h5 wall_time (bootstrap); these are
-    not compared to `run_dir`'s wall time, only reported alongside it.
+    draws) and boot.h5 (its replicate count B). L2 (wall time) is the
+    ratio QIJ/bootstrap within the same draw on the same worker, median
+    over `run_dir`'s draws. L3 (absolute seconds) is the median of those
+    same per-draw durations.
+
+    L3 USED TO COME FROM A SEPARATE ONE-WORKER TIMING RUN, and this
+    function took a `timing_dir` for it. The author retired that run on
+    20 September: every wall time now comes from the main run's own
+    per-draw fields, which is also what Figure D reads. Two reasons it is
+    no worse. The ratio is unaffected either way -- a draw's QIJ and its
+    bootstrap run back to back in one process with one BLAS thread, so
+    the machine cancels within the draw. And at 20 draws the timing run
+    disagreed with the main run's 1000 by up to 0.35 on the cheap
+    estimators, a sample-size effect, not a contention one (checked: a
+    fresh process's first draw is not anomalous).
+
+    The cost L3 does carry: the main run packs many workers onto a node,
+    so these SECONDS are contended and are not a clean measurement of how
+    long one draw takes alone. They are reported for scale, and nothing
+    in the paper should quote them as the cost of a single fit. The
+    ratio, L2, is the defensible quantity.
     """
     rows = []
     for dataset, estimator, estimator_dir in _product_dirs(run_dir):
@@ -627,18 +725,13 @@ def cost_table(run_dir, timing_dir):
 
         wall_time_ratio = _safe_ratio(loaded["wall_time_qij"], loaded["wall_time_bootstrap"])
 
-        timing_estimator_dir = Path(timing_dir) / dataset / estimator
-        timing_truth = pd.read_parquet(timing_estimator_dir / "truth.parquet")
-        timing_outputs = _outputs(timing_truth)
-        timing_loaded = _load_draws(timing_estimator_dir, timing_outputs)
-
         rows.append({
             "dataset": dataset, "estimator": estimator,
             "L1_evaluations_median": np.nanmedian(loaded["evaluations"]),
             "L1_normalized_rows_median": np.nanmedian(loaded["normalized_rows"]),
             "L1_bootstrap_replicates": n_replicates,
             "L2_wall_time_ratio_qij_over_bootstrap_median": np.nanmedian(wall_time_ratio),
-            "L3_wall_time_qij_timing_run_seconds": np.nanmedian(timing_loaded["wall_time_qij"]),
-            "L3_wall_time_bootstrap_timing_run_seconds": np.nanmedian(timing_loaded["wall_time_bootstrap"]),
+            "L3_wall_time_qij_seconds": np.nanmedian(loaded["wall_time_qij"]),
+            "L3_wall_time_bootstrap_seconds": np.nanmedian(loaded["wall_time_bootstrap"]),
         })
     return pd.DataFrame(rows)

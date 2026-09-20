@@ -126,10 +126,25 @@ def kmeans_1d(values: np.ndarray, M: int):
     drop-and-relabel) is unchanged from the previous iteration, or 100
     iterations.
 
-    Cost: O(M) per iteration for the update (a loop over prototypes,
-    never over the N points -- assignment and the per-prototype mean
-    are vectorized numpy operations over the N-length array), at most
-    100 iterations.
+    Cost: O(N) per iteration. The assignment is one `searchsorted` of
+    the N values against the M-1 midpoints; the update is two
+    `bincount`s over the labels, one for the bin counts and one for the
+    bin sums, so every prototype's mean comes out of a single pass over
+    the N points rather than one pass per prototype. The earlier form
+    of this loop asked for `v[labels == k].mean()` once per prototype,
+    which built an N-length boolean mask M times over and made the
+    update O(M N) -- at the Fundamental Plane's M = 371 and N = 2000
+    that was a quarter of the whole draw. The counts are what the
+    empty-bin drop below already needs, so they are computed once and
+    used for both. At most 100 iterations.
+
+    The bin sums are accumulated in `bincount`'s order rather than by
+    `ndarray.mean`'s pairwise summation, so a prototype can differ from
+    the earlier form in the last bit or two. The assignment that
+    follows is a `searchsorted` against midpoints of those prototypes
+    and is insensitive to a difference that size except for a value
+    sitting exactly on a midpoint, which is why this is recorded as a
+    change to the quantizer's arithmetic and not as a pure refactor.
 
     Returns (labels, prototypes): labels (N,) int, contiguous
     0..M_used-1, ordered by increasing prototype value; prototypes
@@ -150,12 +165,19 @@ def kmeans_1d(values: np.ndarray, M: int):
             mids = (prototypes[:-1] + prototypes[1:]) / 2.0
             labels = np.searchsorted(mids, v, side="left")
 
-        present = np.unique(labels)
-        if present.size < prototypes.size:
+        # `bincount` over the contiguous label range gives the same
+        # `present` set `np.unique(labels)` did -- sorted and distinct
+        # by construction -- without sorting the N labels to find it,
+        # and the counts it returns are the denominators the update
+        # needs a few lines below.
+        counts = np.bincount(labels, minlength=prototypes.size)
+        if not counts.all():
+            present = np.flatnonzero(counts)
             remap = np.full(prototypes.size, -1, dtype=int)
             remap[present] = np.arange(present.size)
             labels = remap[labels]
             prototypes = prototypes[present]
+            counts = counts[present]
 
         converged = (
             prev_labels is not None
@@ -166,9 +188,10 @@ def kmeans_1d(values: np.ndarray, M: int):
             break
         prev_labels = labels
 
-        prototypes = np.array(
-            [v[labels == k].mean() for k in range(prototypes.size)]
-        )
+        # Every bin is non-empty here (the drop above saw to it), so
+        # `counts` is strictly positive and no mean is undefined.
+        sums = np.bincount(labels, weights=v, minlength=prototypes.size)
+        prototypes = sums / counts
 
     labels = labels.astype(int)
     return labels, prototypes

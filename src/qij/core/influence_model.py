@@ -200,6 +200,10 @@ _LOG_LAM_HI = math.log(1e2)
 _N_WIDTH_GRID = 5
 _UNCERTAINTY_BATCH_CAP = 4096
 _BPV_CHUNK = 2048
+# The widest range of c*(x - o) a block of `_matern32_self_sum_1d` may
+# span: e^{+-200} is far inside double range, and the reordering it
+# costs is bounded by about 100 roundings on a sum of positive terms.
+_SELF_SUM_LOG_RANGE = 200.0
 _FITC_D0_FLOOR = 1e-6  # see _fit_fitc_influence_model's docstring on D0
 
 # The per-draw kernel-row cache's memory budget (module docstring, "The
@@ -437,6 +441,87 @@ def _matern32(r: np.ndarray, ell: float) -> np.ndarray:
     """k_ell(r) = (1 + sqrt(3) r / ell) exp(-sqrt(3) r / ell)."""
     s = (_SQRT3 / ell) * r
     return (1.0 + s) * np.exp(-s)
+
+
+def _matern32_self_sum_1d(x: np.ndarray, ell: float) -> float:
+    """
+    sum_{i,j} k_ell(|x_i - x_j|) over one bin's OWN points, for a
+    one-dimensional design, in O(n log n) (the sort) rather than the
+    O(n^2) of forming the bin's full pairwise kernel.
+
+    With c = sqrt(3)/ell and the points sorted ascending, every pair
+    contributes through r_ij = x_i - x_j for i > j, so
+
+        sum_{i,j} (1 + c r_ij) e^{-c r_ij} = n + 2 sum_i (S_i + c T_i),
+        S_i = sum_{j<i} e^{-c(x_i - x_j)},
+        T_i = sum_{j<i} (x_i - x_j) e^{-c(x_i - x_j)}.
+
+    Both are running sums. Against a local origin o, with u_i = x_i - o,
+
+        S_i = e^{-c u_i} sum_{j<i} e^{c u_j},
+        T_i = u_i S_i - e^{-c u_i} sum_{j<i} u_j e^{c u_j},
+
+    so one exclusive cumulative sum of e^{c u_j} and one of
+    u_j e^{c u_j} deliver every S_i and T_i at once.
+
+    The origin has to move, because e^{c u} overflows once c u passes
+    about 709. The points are therefore cut into consecutive blocks
+    each spanning at most 200/c, which holds every exponential inside a
+    block within e^{+-200}, and the two running sums are carried across
+    a block boundary exactly: for a new origin o' = o + d, the carried
+    sums become e^{-c d} times (the old sums over every point so far),
+    the second one shifted by d. No pair is dropped and none is
+    approximated -- the only difference from the pairwise sum is the
+    order the terms are added in.
+
+    `bin_posterior_variance` keeps its pairwise double sum for designs
+    of two dimensions or more, where |x_i - x_j| is not a difference of
+    coordinates and none of this applies.
+    """
+    xs = np.sort(np.asarray(x, dtype=float).ravel())
+    n = xs.size
+    if n <= 1:
+        return float(n)
+
+    c = _SQRT3 / ell
+    block_span = _SELF_SUM_LOG_RANGE / c
+
+    acc = 0.0
+    s_carry = 0.0   # sum over earlier points of e^{c (x_j - o)}
+    t_carry = 0.0   # sum over earlier points of (x_j - o) e^{c (x_j - o)}
+    start = 0
+    while start < n:
+        end = int(np.searchsorted(xs, xs[start] + block_span, side='right'))
+        u = xs[start:end] - xs[start]
+        a = np.exp(-c * u)
+        b = np.exp(c * u)
+        ub = u * b
+        # Exclusive cumulative sums, built by shifting an inclusive one
+        # rather than subtracting the term back off: b increases across
+        # a block, so `cumsum(b) - b` would cancel to nothing wherever a
+        # gap makes b_i dominate everything before it.
+        cb = np.empty(u.size, dtype=float)
+        cb[0] = 0.0
+        np.cumsum(b[:-1], out=cb[1:])
+        cub = np.empty(u.size, dtype=float)
+        cub[0] = 0.0
+        np.cumsum(ub[:-1], out=cub[1:])
+
+        s_tot = s_carry + cb
+        S = a * s_tot
+        T = u * S - a * (t_carry + cub)
+        acc += float(np.add.reduce(S) + c * np.add.reduce(T))
+
+        if end < n:
+            s_all = s_carry + float(np.add.reduce(b))
+            t_all = t_carry + float(np.add.reduce(ub))
+            d = float(xs[end] - xs[start])
+            phi = math.exp(-c * d)
+            s_carry = phi * s_all
+            t_carry = phi * (t_all - d * s_all)
+        start = end
+
+    return float(n) + 2.0 * acc
 
 
 def _basis(Zw: np.ndarray, m: int) -> np.ndarray:
@@ -807,14 +892,31 @@ def _fit_gp_influence_model(
 
         grid_nlls = [t['nll'] for t in trace[:_N_WIDTH_GRID]]
         best_idx = int(np.argmin(grid_nlls))
-        if best_idx == 0:
+        # Revision 10 (plan section 36.17(2), 20 September 2026): the
+        # bounded refinement is SKIPPED when the best grid point is the
+        # upper endpoint, and kept everywhere else. With the affine mean
+        # projected out the Matern-3/2 expansion loses its constant and
+        # its quadratic term exactly (Q^T 1 = 0 and Q^T X = 0), so the
+        # leading survivor is sqrt(3) r^3 / ell^3: past about ell_max
+        # the family collapses to ONE fixed kernel, the r^3 polyharmonic
+        # spline with an affine null space, rescaled by s^2 / ell^3.
+        # lambda_max(Q^T K Q) ell^3 is constant to three digits over
+        # four decades there, so ell is not identified and the
+        # refinement can only climb the shallow log-determinant tilt
+        # left where the ell^-3 collapse meets the lambda floor -- 26 of
+        # 31 outer evaluations on fp did exactly that, moving V_btw by
+        # at most 0.08% and usually not at all. At an INTERIOR minimum
+        # the refinement does real work and stays: on Pareto seed 0 it
+        # moves ell from 14.47 to 5.99 and buys 42 nats. The LOWER
+        # endpoint keeps it too -- that bound has never been hit.
+        if best_idx == _N_WIDTH_GRID - 1:
+            lo = hi = None
+        elif best_idx == 0:
             lo, hi = grid_log_ell[0], grid_log_ell[1]
-        elif best_idx == _N_WIDTH_GRID - 1:
-            lo, hi = grid_log_ell[-2], grid_log_ell[-1]
         else:
             lo, hi = grid_log_ell[best_idx - 1], grid_log_ell[best_idx + 1]
 
-        if hi > lo:
+        if lo is not None and hi > lo:
             minimize_scalar(outer_obj, bounds=(float(lo), float(hi)), method='bounded')
 
         best = min(trace, key=lambda t: t['nll'])
@@ -1184,17 +1286,21 @@ def bin_posterior_variance(
 
     `R` is a plain row sum of the per-point residuals `_point_terms`
     already computed and cached (module docstring) -- a refinement
-    split's child bin never re-derives r_i for its own points. `s` and
-    `SS_k` are accumulated over the group's rows in chunks of at most
-    2048, `s` from the cached kernel rows when the cache is on and by
-    re-forming them when it is not (bit-identical either way);
-    `SS_k`'s double sum chunks BOTH sides (a plain nested loop over
-    chunk pairs, symmetry not exploited), so no block larger than 2048
-    x 2048 is ever materialized -- the naive one-sided chunking (chunk
-    against the whole group) would still allocate a chunk_size x n_k
-    block, unbounded in n_k. `SS_k` is the one term here that no cache
-    removes: it is a sum of raw kernel values between the bin's OWN
-    points, not a product against the design.
+    split's child bin never re-derives r_i for its own points. `s` is
+    accumulated over the group's rows in chunks of at most 2048, from
+    the cached kernel rows when the cache is on and by re-forming them
+    when it is not (bit-identical either way). `SS_k` is the one term
+    here that no cache removes: it is a sum of raw kernel values
+    between the bin's OWN points, not a product against the design.
+    Where the design is one-dimensional it is not summed pairwise at
+    all -- `_matern32_self_sum_1d` gets it from running sums over the
+    bin's sorted points, O(n_k log n_k) rather than O(n_k^2). In two
+    dimensions or more the pairwise double sum stands, chunked on BOTH
+    sides (a plain nested loop over chunk pairs, symmetry not
+    exploited), so no block larger than 2048 x 2048 is ever
+    materialized -- the naive one-sided chunking (chunk against the
+    whole group) would still allocate a chunk_size x n_k block,
+    unbounded in n_k.
 
     `s^T A^-1 s` is taken through the group's shared eigendecomposition
     K = V Lambda V^T, as sum_m (V^T s)_m^2 / (Lambda_m + lam_c +
@@ -1209,10 +1315,11 @@ def bin_posterior_variance(
     Cost: O(L * M_X_used^2) in the one M x M product per bin (V against
     the bin-summed kernel vector), never repeated per point, plus O(L *
     m_c^2) for the G-solves; O(N * M_X_used) to form the bin-summed
-    vector s (one cached kernel row per point, summed); O(sum_k n_k^2)
-    for the SS_k double sums, a cost bounded by chunking in memory but
-    not in M_X_used or in L -- this term does not depend on M_X_used at
-    all, since it is a sum of raw kernel values, not a solve. Never
+    vector s (one cached kernel row per point, summed); and for the
+    SS_k terms O(sum_k n_k log n_k) in one dimension, O(sum_k n_k^2)
+    above it, a cost bounded by chunking in memory but not in M_X_used
+    or in L -- this term does not depend on M_X_used at all, since it
+    is a sum of raw kernel values, not a solve. Never
     O(N * M_X_used^2): no per-point solve against A is formed here.
 
     Returns 0.0 for a group of size <= 1, and 0.0 for every group
@@ -1244,6 +1351,11 @@ def bin_posterior_variance(
     M = centers_c.shape[0]
     V_K = model.k_eigvec[c]
     w_c = 1.0 / (model.k_eigval[c] + float(model.lam[c]) + float(model.jitter[c]))
+    # A one-dimensional design takes SS_k from the sorted running sums
+    # of `_matern32_self_sum_1d` instead of the pairwise double sum --
+    # the O(sum_k n_k^2) term, and the only one here that no cache
+    # removes. In two dimensions or more the pairwise path stands.
+    one_dim = Zw_full.shape[1] == 1
 
     for gi, idx in enumerate(groups):
         idx = np.asarray(idx)
@@ -1256,7 +1368,7 @@ def bin_posterior_variance(
         mean_diag = float(np.mean(sigma_c[idx] ** 2))
 
         s_vec = np.zeros(M, dtype=float)
-        SS_k = 0.0
+        SS_k = _matern32_self_sum_1d(Zw_k[:, 0], ell_c) if one_dim else 0.0
 
         for start in range(0, n_k, _BPV_CHUNK):
             sl = slice(start, start + _BPV_CHUNK)
@@ -1269,6 +1381,8 @@ def bin_posterior_variance(
 
             s_vec += Kc.sum(axis=0)
 
+            if one_dim:
+                continue
             for start2 in range(0, n_k, _BPV_CHUNK):
                 sl2 = slice(start2, start2 + _BPV_CHUNK)
                 Dcc = cdist(Zc, Zw_k[sl2])
@@ -1667,14 +1781,23 @@ def _fit_fitc_influence_model(
 
         grid_nlls = [t['nll'] for t in trace[:_N_WIDTH_GRID]]
         best_idx = int(np.argmin(grid_nlls))
-        if best_idx == 0:
+        # The upper-endpoint skip of revision 10, for the same reason it
+        # is taken on the dense path above (plan section 36.17(2)): past
+        # about ell_max the projected Matern-3/2 family collapses to the
+        # r^3 polyharmonic spline and ell stops being identified, so the
+        # refinement there buys nothing. Kept in step with the dense path
+        # deliberately -- this influence model is built and committed but
+        # not adopted, and two different width-search rules in one file
+        # is exactly the trap that would be found the hard way if it ever
+        # were switched on.
+        if best_idx == _N_WIDTH_GRID - 1:
+            lo = hi = None
+        elif best_idx == 0:
             lo, hi = grid_log_ell[0], grid_log_ell[1]
-        elif best_idx == _N_WIDTH_GRID - 1:
-            lo, hi = grid_log_ell[-2], grid_log_ell[-1]
         else:
             lo, hi = grid_log_ell[best_idx - 1], grid_log_ell[best_idx + 1]
 
-        if hi > lo:
+        if lo is not None and hi > lo:
             minimize_scalar(outer_obj, bounds=(float(lo), float(hi)), method='bounded')
 
         best = min(trace, key=lambda t: t['nll'])
