@@ -116,7 +116,7 @@ def _pin_threads() -> None:
 # ─────────────────────────────────────────────────────────────────────
 
 def _run_draw(dataset_fn, N, s, master_seed, estimator_items, vq_transform,
-              eps, B):
+              eps, B, influence_model, fitc_rank):
     """
     One draw s of one dataset: `X = dataset_fn(N, seed)` once, then for
     every (name, T, theta_true) in `estimator_items`, `Bootstrap` and
@@ -139,7 +139,8 @@ def _run_draw(dataset_fn, N, s, master_seed, estimator_items, vq_transform,
         theta_hat = np.asarray(T(X, ones), dtype=float)
         boot_res = Bootstrap(B=B, seed=seed).fit(X, T)
         psi_fn = getattr(T, 'influence', None)
-        qij_res = QIJ(eps=eps, seed=seed, vq_transform=vq_transform).fit(
+        qij_res = QIJ(eps=eps, seed=seed, vq_transform=vq_transform,
+                       influence_model=influence_model, fitc_rank=fitc_rank).fit(
             X, T, influence=psi_fn)
 
         truth_row = {'s': s, 'seed': seed}
@@ -445,7 +446,8 @@ def _write_boot_slot(f: h5py.File, s: int, seed: int, res: dict) -> None:
 # ─────────────────────────────────────────────────────────────────────
 
 def _run_dataset(dataset_name, dataset_fn, estimators, N, S, B, master_seed,
-                  eps, vq_transform, est_dirs, workers) -> None:
+                  eps, vq_transform, est_dirs, workers,
+                  influence_model, fitc_rank) -> None:
     for d in est_dirs.values():
         os.makedirs(d, exist_ok=True)
 
@@ -472,6 +474,7 @@ def _run_dataset(dataset_name, dataset_fn, estimators, N, S, B, master_seed,
     gen = parallel(
         delayed(_run_draw)(
             dataset_fn, N, s, master_seed, estimator_items, vq_transform, eps, B,
+            influence_model, fitc_rank,
         )
         for s in pending
     )
@@ -513,6 +516,16 @@ def run_study(config: dict, out_dir: str, workers: int) -> None:
     eps = float(config.get('eps', 0.01))
     S = int(config['S'])
     B = int(config['B'])
+    # The influence-model switch (module docstring is silent on this by
+    # design -- Amendment 6's "no `partition`/`points` config key" spirit
+    # extends here too, except this one genuinely IS a run choice, so it
+    # is recorded in the run's own config.yaml rather than an environment
+    # variable): 'gp' (default, unchanged behaviour) or 'fitc' (sparse).
+    # `fitc_rank` is the FITC inducing-point count; absent or null means
+    # "use the default per coordinate group" (`QIJ`'s own default).
+    influence_model = config.get('influence_model', 'gp')
+    fitc_rank = config.get('fitc_rank')
+    fitc_rank = int(fitc_rank) if fitc_rank is not None else None
     os.makedirs(out_dir, exist_ok=True)
 
     for dcfg in config['datasets']:
@@ -535,4 +548,5 @@ def run_study(config: dict, out_dir: str, workers: int) -> None:
             _run_dataset(
                 dataset_name, dataset_fn, estimators, N, S, B, master_seed,
                 eps, vq_transform, est_dirs, workers,
+                influence_model, fitc_rank,
             )

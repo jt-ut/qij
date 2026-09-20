@@ -180,8 +180,8 @@ RC = {
     "lines.markersize":   5,
     "figure.dpi":         120,
     "savefig.dpi":        300,
-    "savefig.bbox":       "tight",
-    "figure.constrained_layout.use": True,
+    "savefig.bbox":       None,
+    "figure.constrained_layout.use": False,   # see the note below -- load-bearing
 }
 
 def use_qij_style():
@@ -267,29 +267,41 @@ The §4 sizes assume a larger canvas and are oversized here. LNCS body is 10 pt,
 
 ### PDF settings
 
+There is **one** rcParams dict, the `RC` above, applied by `use_qij_style()`.
+An earlier draft of this guide printed a second, `RC_LNCS`, layered over it
+with `**RC`. That two-dict form is gone from `figures.py` (20 September) and
+must not come back: one size, one build, one style. The paper-size values it
+carried are already in `RC`, alongside:
+
 ```python
-RC_LNCS = {
-    **RC,
-    "figure.figsize":     (4.80, 2.20),
-    "axes.titlesize":     9,
-    "axes.labelsize":     8.5,
-    "legend.fontsize":    7.5,
-    "legend.title_fontsize": 8,
-    "xtick.labelsize":    7.5,
-    "ytick.labelsize":    7.5,
-    "lines.linewidth":    1.2,
-    "lines.markersize":   3.5,
-    "grid.linewidth":     0.4,
     "pdf.fonttype":       42,      # TrueType, embedded. Default 3 is often rejected
     "ps.fonttype":        42,
-    "savefig.format":     "pdf",
-    "savefig.bbox":       None,    # NOT 'tight' -- keeps widths exactly equal
     "savefig.transparent": False,
-    "figure.constrained_layout.use": True,
-}
 ```
 
 `pdf.fonttype = 42` is the setting that matters; Type 3 fonts fail many publisher checks.
+
+### `figure.constrained_layout.use` MUST be False
+
+This is not a style preference, and the value printed here was `True` until
+20 September, which was a live bug. Every figure lays itself out by hand with
+`subplots_adjust` and passes `constrained_layout=False` to `plt.subplots`,
+which does leave the engine as `None` **at construction** -- but that opt-out
+does not survive a save. `Figure.savefig` wraps the save in
+`figure._cm_set(layout_engine='none')`, and on exit that restores the captured
+value by calling `set_layout_engine(layout=None)`, whose contract for `None`
+is not "no engine" but "take it from rcParams". With this True, the first
+`savefig` silently installs a live `ConstrainedLayoutEngine`; the **second**
+save on the same figure object then executes it and discards every
+`subplots_adjust`.
+
+Measured on matplotlib 3.9.4: Figure D's axes went from top 0.800 / bottom
+0.275 to top 0.936 / bottom 0.072 between the first and second save. Since the
+figures are written as a PDF and a PNG from one object, whichever was written
+SECOND got the broken geometry -- order-dependent, not format-dependent, which
+is what made it confusing to diagnose. `savefig.bbox` is likewise `None` and
+not `"tight"`: cropping was investigated as the cause and ruled out, but the
+two must stay consistent for widths to be exactly equal across figures.
 
 ### Page budget: consolidate nine figures into five
 

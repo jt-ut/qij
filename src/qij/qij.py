@@ -44,11 +44,21 @@ class QIJ:
     """The QIJ method (plan §1, §6)."""
 
     def __init__(self, eps: float = 0.01, eta: Optional[float] = None,
-                 seed: int = 0, vq_transform=None) -> None:
+                 seed: int = 0, vq_transform=None,
+                 influence_model: str = 'gp', fitc_rank: Optional[int] = None) -> None:
         self.eps = eps
         self.eta = eta
         self.seed = seed
         self.vq_transform = vq_transform
+        # The influence-model switch (FITC smoke-test addition): 'gp'
+        # (default, bit-identical to before this option existed) or
+        # 'fitc' (sparse, inducing-point); `fitc_rank` is the FITC
+        # inducing-point count, None meaning "compute the default per
+        # coordinate group" (`core.influence_model._fitc_default_rank`).
+        # Both are threaded straight through to `core.influence_model.
+        # fit_influence_model`, which validates `influence_model` itself.
+        self.influence_model = influence_model
+        self.fitc_rank = fitc_rank
 
     def fit(self, X: np.ndarray, T, influence=None) -> QIJResult:
         """Run the method on one draw. Order (plan §6): the 𝒳-VQ and
@@ -95,7 +105,9 @@ class QIJ:
         # no estimation. Needed on the result for `qij_prototypes.parquet`
         # (plan's F9 measured-points product).
         W_X = np.asarray(inverse(xvq.centers), dtype=float)
-        model = fit_influence_model(Z, xvq, I_proto, theta_Q, eta)
+        model = fit_influence_model(Z, xvq, I_proto, theta_Q, eta,
+                                     influence_model=self.influence_model,
+                                     fitc_rank=self.fitc_rank)
         psi0_all = _psi0(model, Z)
         sigma_all = _uncertainty(model, Z)
         wall_time_prototype = time.perf_counter() - t0

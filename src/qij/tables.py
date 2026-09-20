@@ -54,7 +54,6 @@ import pandas as pd
 import yaml
 
 from qij.core.intervals import percentile_interval, qij_interval
-from qij.estimators import supports_for
 
 __all__ = ["t1", "coverage_grid", "cost_table"]
 
@@ -152,20 +151,20 @@ def _load_draws(estimator_dir, outputs):
 def _compute_intervals(loaded, level):
     """The QIJ and bootstrap intervals at `level`, one row per draw,
     recomputed from the arrays `_load_draws` returned:
-    `qij_interval(theta_hat, V_tot_hat, a_bca, level, support)` and
-    `percentile_interval(theta_bootstrap, level)`. `support` (q, 2) is
-    `estimators.supports_for(loaded["outputs"])`, each output's natural
-    parameter support, clipping the QIJ interval into it (the bootstrap's
-    percentile interval is never clipped). Loop over draws only (<= S),
-    never over N."""
+    `qij_interval(theta_hat, V_btw, level)` and
+    `percentile_interval(theta_bootstrap, level)`. The QIJ interval is
+    the normal interval on the measured between-bin variance, with no
+    acceleration term and no support clip (see
+    `core.intervals.qij_interval` for why each came out); `v_tot_hat`
+    and `a_bca` are still loaded, and T1 still reports `V_tot_hat`
+    against the oracle and Monte Carlo variances, but neither enters an
+    interval. Loop over draws only (<= S), never over N."""
     theta_hat = loaded["theta_hat"]
     n, q = theta_hat.shape
-    support = supports_for(loaded["outputs"])
     qij_lo_hi = np.full((n, q, 2), np.nan)
     bootstrap_lo_hi = np.full((n, q, 2), np.nan)
     for i in range(n):
-        qij_lo_hi[i] = qij_interval(theta_hat[i], loaded["v_tot_hat"][i],
-                                     loaded["a_bca"][i], level, support=support)
+        qij_lo_hi[i] = qij_interval(theta_hat[i], loaded["v_btw"][i], level)
         bootstrap_lo_hi[i] = percentile_interval(loaded["theta_bootstrap"][i], level)
     return qij_lo_hi, bootstrap_lo_hi
 
@@ -286,21 +285,26 @@ def t1(run_dir):
     rather than a proxy for it: a draw counts as QIJ-failed here
     exactly when `qij_interval`'s own `[lo, hi]` is non-finite for that
     output -- i.e. exactly the draws `cov_qij` (below) already marks
-    NaN, whatever combination of `theta_hat`, `V_tot_hat` or `a_bca`
-    produced it. This is deliberately the same test regardless of which
-    of the two product shapes on disk produced the non-finite interval:
-    a run written before the collapsed-stage-1 fix stores a collapsed
-    draw as `L = 1`, `V_btw = V_win_hat = V_tot_hat = B_hat = 0.0`,
-    `a_bca = NaN` (finite variance, undefined acceleration, still a
-    non-finite interval through the BCa adjustment); a run written
-    after it stores `V_btw`/`V_tot_hat`/`a_bca` all NaN directly (plan
-    §36.2 ruling 4). Both collapse into the same NaN `[lo, hi]`, so
-    testing the interval -- not `L == 1 and V_btw == 0`, which would
-    only catch the first shape, or `V_tot_hat` alone, which would miss
-    the pre-fix shape's finite zero -- counts both without a
-    product-shape branch and without double-counting a draw that is
-    NaN by both routes at once (there is only one route once the
-    interval itself is the test).
+    NaN, whether it was `theta_hat` or `V_btw` that was NaN. Testing
+    the interval, not a proxy such as `L == 1 and V_btw == 0`, counts
+    every cause without a branch per cause and without double-counting
+    a draw that is NaN by both routes at once (there is only one route
+    once the interval itself is the test).
+
+    One consequence of the 20 September interval change (the normal
+    interval on `V_btw`; `core.intervals.qij_interval`) is worth
+    stating, because it is a difference in what this column would count
+    on an OLD product. A run written before the collapsed-stage-1 fix
+    stored a collapsed draw as `L = 1`, `V_btw = V_win_hat = V_tot_hat
+    = B_hat = 0.0`, `a_bca = NaN`, and the BCa adjustment turned that
+    undefined acceleration into a non-finite interval, so the draw was
+    counted failed. Under the new form the same row gives the finite
+    degenerate interval `[theta_hat, theta_hat]`, which would be
+    counted as a (certainly missing) draw instead. No such row exists
+    in the products this tables: a run written after the fix stores
+    `V_btw`/`V_tot_hat`/`a_bca` all NaN directly (plan §36.2 ruling 4),
+    which is still NaN `[lo, hi]`, and on the main run the same three
+    MVT nu draws are excluded before and after.
 
     `n_qij_failed` is built from the exact same finiteness mask
     `cov_qij` uses, so `n_draws - n_qij_failed` equals `n_qij`
@@ -383,8 +387,9 @@ def t1(run_dir):
     interval, which is a strict superset whenever the two causes
     differ (plan §36.1: on the IMF, 17 of the 31 are box hits, the
     other 14 are QIJ-side; a box hit's NaN `theta_hat` also NaNs the
-    interval, since `qij_interval` adds `adj*se` to `theta_hat`
-    itself, so `n_qij_failed >= n_draws_excluded` always, never less).
+    interval, since `qij_interval` adds `+/- z sqrt(V_btw)` to
+    `theta_hat` itself, so `n_qij_failed >= n_draws_excluded` always,
+    never less).
     Per plan section 4, a fit resting on an active parameter-box bound
     is not a stationary point, so its influence is not defined there
     either; the estimator, never this table, is what applies the rule

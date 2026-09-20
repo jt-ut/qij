@@ -12,7 +12,6 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from . import estimators as _est
 from .core import intervals
 from .core.influence_model import InfluenceModel
 from .core.refine import CoordinateResult
@@ -64,21 +63,21 @@ class QIJResult:
 
     @property
     def variance(self) -> np.ndarray:
-        """V̂_tot per output (q,)."""
-        return np.array([cr.V_tot_hat for cr in self.coordinates])
-
-    @property
-    def _a_bca(self) -> np.ndarray:
-        return np.array([cr.a_bca for cr in self.coordinates])
+        """V_btw per output (q,): the measured between-bin variance, which
+        is the variance the interval rests on. The second quantizer bounds
+        the within-bin term below the declared tolerance epsilon, so V_btw
+        is a lower bound on the variance that is tight to epsilon. V̂_win,
+        V̂_tot, B̂ and â_BCa remain on each `CoordinateResult` and in
+        `.summary()` as diagnostics."""
+        return np.array([cr.V_btw for cr in self.coordinates])
 
     def interval(self, level: float) -> np.ndarray:
-        """(q, 2) lower, upper; a pure function of θ̂, V̂_tot and â_BCa
+        """(q, 2) lower, upper; a pure function of θ̂ and V_btw
         (interface sheet §4 `core/intervals.py`), computed fresh at any
-        level, clipped to each output's natural parameter support
-        (`estimators.supports_for`, keyed by `self.outputs`)."""
-        support = _est.supports_for(self.outputs)
-        return intervals.qij_interval(self.theta_hat, self.variance, self._a_bca,
-                                       level, support=support)
+        level: θ̂ ± z_{(1+level)/2} sqrt(V_btw). No acceleration term and
+        no support clip -- an ablation on the main run's products found
+        both immaterial (see `core.intervals.qij_interval`)."""
+        return intervals.qij_interval(self.theta_hat, self.variance, level)
 
     def summary(self) -> pd.DataFrame:
         """One row per output: `output, V_btw, V_win_hat, V_tot_hat, B_hat,

@@ -12,48 +12,54 @@ import numpy as np
 from scipy.stats import norm
 
 
-def qij_interval(theta_hat: np.ndarray, variance: np.ndarray,
-                  a_bca: np.ndarray, level: float,
-                  support: np.ndarray = None) -> np.ndarray:
+def qij_interval(theta_hat: np.ndarray, V_btw: np.ndarray,
+                  level: float) -> np.ndarray:
     """
-    The QIJ interval h^QIJ_level (glossary): the level*100% BCa-form
-    interval with variance `variance` (V_tot_hat), acceleration
-    `a_bca`, z0 = 0, centred at `theta_hat`. Each of `theta_hat`,
-    `variance`, `a_bca` is (q,).
+    The QIJ interval h^QIJ_level (glossary): the normal interval on the
+    measured between-bin variance,
 
-    `support`, (q, 2) of [lo, hi] per coordinate (e.g. (0, inf) for a
-    scale parameter, (0, 1) for a tail probability), clips the computed
-    `lo`/`hi` into that coordinate's natural parameter support.
-    `support=None` (the default) applies no clip. The clip can only
-    narrow the interval, never widen it, and never touches `theta_hat`
-    itself or anything upstream of `lo`/`hi`: the truth lies in its own
-    parameter's support by construction, so clipping the interval to
-    that same support removes only infeasible region the BCa adjustment
-    produced, and cannot change which draws are covered. NaN in `lo`/
-    `hi` (a failed draw) stays NaN through the clip (`np.maximum`/
-    `np.minimum` propagate NaN).
+        theta_hat +/- z_{(1+level)/2} * sqrt(V_btw),
 
+    centred at `theta_hat`. Both `theta_hat` and `V_btw` are (q,).
     Returns (q, 2), [lo, hi].
+
+    WHY V_btw AND NOTHING ELSE. The second quantizer's job is to bound
+    the within-bin term below the declared tolerance epsilon, so V_btw
+    is a lower bound on the variance that is tight to epsilon. That is
+    the paper's justification for the second stage, and the interval
+    rests on it directly.
+
+    WHAT CAME OUT, and the ablation on these products that established
+    each term was immaterial (it is stated here, not re-derived):
+    V_win_hat is under 0.6% of the total variance on all eleven
+    coordinates, so V_tot_hat = V_btw + V_win_hat moved the half-width
+    by under 0.3%; the median |a_bca| is 0.0002-0.037, so the BCa
+    acceleration adjustment (`z / (1 - a z)`, z0 = 0) moved either
+    endpoint by a comparable fraction of one standard error; and the
+    natural-parameter support clip changed NO endpoint on ANY draw. The
+    clip mattered only for the superseded two-regime IMF estimator,
+    whose near-singular draws produced blown-up intervals; the Chabrier
+    estimator that replaced it has a Hessian condition number of at
+    most 13, so nothing blows up and nothing clips. V_win_hat,
+    V_tot_hat, B_hat and a_bca are still computed and still written to
+    the products -- they are diagnostics now, not interval inputs, and
+    the estimators' `supports` declarations stay as documentation of
+    each estimator's domain.
+
+    A negative `V_btw` (it cannot arise from `core.ivq.between_terms`,
+    which sums squares, but the guard costs nothing) is floored at zero
+    rather than producing a NaN half-width. NaN in `theta_hat` or
+    `V_btw` -- a failed draw -- propagates to NaN in `lo`/`hi`, which is
+    how every caller detects a draw with no QIJ interval.
     """
     theta_hat = np.asarray(theta_hat, dtype=float)
-    variance = np.asarray(variance, dtype=float)
-    a_bca = np.asarray(a_bca, dtype=float)
+    V_btw = np.asarray(V_btw, dtype=float)
 
-    alpha = 1.0 - level
-    z_lo = float(norm.ppf(alpha / 2.0))
-    z_hi = float(norm.ppf(1.0 - alpha / 2.0))
+    z = float(norm.ppf(0.5 * (1.0 + level)))
+    half = z * np.sqrt(np.maximum(V_btw, 0.0))
 
-    se = np.sqrt(np.maximum(variance, 0.0))
-    adj_lo = z_lo / (1.0 - a_bca * z_lo)
-    adj_hi = z_hi / (1.0 - a_bca * z_hi)
-
-    lo = theta_hat + adj_lo * se
-    hi = theta_hat + adj_hi * se
-
-    if support is not None:
-        support = np.asarray(support, dtype=float)
-        lo = np.maximum(lo, support[..., 0])
-        hi = np.minimum(hi, support[..., 1])
+    lo = theta_hat - half
+    hi = theta_hat + half
 
     return np.stack([lo, hi], axis=-1)
 

@@ -2,20 +2,24 @@
 The paper's figures (`QIJ_figure_spec_final.md`, 19 September 2026): Figure
 A (accuracy, replaces F2), Figure B (refined influence against the truth,
 replaces F3 and F9), Figure C (precision per evaluation, redesigned 19
-September, replaces F7), Figure D (cost, redesigned 19 September, replaces
-F10 entirely -- three panels, "when QIJ pays" against cost against N
-against accuracy against N; the old normalized-rows/wall-time-ratio and
-bound-hit-fraction panels are gone, one sentence each in the text instead).
+September, replaces F7), Figure D (wall time, redesigned 20 September,
+replaces F10 entirely -- a 2x2 of estimator objects, each panel carrying a
+seconds axis and a QIJ/Boot ratio axis over the same markers; the old
+"when QIJ pays"/cost-against-N/accuracy-against-N panels are gone, as are
+the normalized-rows and bound-hit-fraction panels before them).
 Every figure here is a pure function of the products `qij.study` writes
 under `<run_dir>/<dataset>/<estimator>/` -- `truth.parquet`, `qij.parquet`,
 `boot.h5`, `qij_points.parquet`, `qij_prototypes.parquet`. Nothing else is
 read: no estimator is re-run, no dataset is redrawn, no interval is read
 (none is stored -- every interval here is recomputed from
 `core.intervals.qij_interval` or `core.intervals.percentile_interval`).
-Figure C no longer needs a separate timing run: the 19 September redesign
-measures both methods against the truth in the same evaluation-cost unit,
-not against wall time. Figure D's redesign needs one again, for its own
-panel (a) alone -- see `fig_d`'s docstring.
+NO figure needs a separate timing run, and none needs a cost-against-N
+sweep. Figure C's 19 September redesign measures both methods against the
+truth in the same evaluation-cost unit rather than against wall time, and
+Figure D's 20 September redesign reads the per-draw wall times already in
+the main products (`qij.parquet`'s `wall_time_total`, `boot.h5`'s
+`wall_time`), where a draw's QIJ and its bootstrap ran back to back in one
+process. `<run_dir>` is every figure's only input.
 QIJ's second-order interval was built, checked against plan §34's decision
 rule on the rev-7 products and rejected there (it lowered coverage on
 every coordinate at every level, plan §36.1, §36.2 ruling 6); this module
@@ -111,16 +115,15 @@ from scipy.stats import pearsonr
 from scipy.stats.mstats import mjci
 
 from qij.core.intervals import percentile_interval, qij_interval
-from qij.estimators import supports_for
 
 __all__ = ["fig_a", "fig_b", "fig_c", "fig_d"]
 
 # ---------------------------------------------------------------------------
 # Style (QIJ_figure_style.md, inlined -- this task's only files are
 # figures.py and scripts/make_figures.py, so there is no separate style
-# module). Palette and rcParams unchanged from the module this replaces;
-# the LNCS sizes below are the ones fixed in the style guide's section 8 on
-# 19 September, verified against the revision's own llncs.cls.
+# module). Palette from the module this replaces; the sizes below are the
+# ones fixed in the style guide's section 8 on 19 September, verified
+# against the revision's own llncs.cls.
 # ---------------------------------------------------------------------------
 
 OI = dict(black="#000000", orange="#E69F00", skyblue="#56B4E9",
@@ -134,36 +137,53 @@ METHOD = {
 }
 BAND = dict(materiality="#DDDDDD")
 
+# The one rcParams dict, at the paper's sizes: titles 9pt (both
+# `axes.titlesize` and `figure.titlesize`), axis labels 8.5, ticks and
+# legend 7.5, as the style guide's section 8 fixes them. Fixed point sizes
+# are correct here only because a figure is built at the inches it is
+# placed at and included 1:1 -- see `_use_style`.
 RC = {
     "font.family": "DejaVu Sans",
-    "axes.titlesize": 12, "axes.titleweight": "bold",
-    "axes.labelsize": 11, "axes.labelweight": "bold",
-    "axes.grid": True, "grid.alpha": 0.25, "grid.linewidth": 0.6,
+    "axes.titlesize": 9, "axes.titleweight": "bold", "figure.titlesize": 9,
+    "axes.labelsize": 8.5, "axes.labelweight": "bold",
+    "axes.grid": True, "grid.alpha": 0.25, "grid.linewidth": 0.4,
     "axes.spines.top": False, "axes.spines.right": False,
-    "xtick.labelsize": 9.5, "ytick.labelsize": 9.5,
-    "legend.fontsize": 9.5, "legend.title_fontsize": 10,
+    "xtick.labelsize": 7.5, "ytick.labelsize": 7.5,
+    "legend.fontsize": 7.5, "legend.title_fontsize": 8,
     "legend.frameon": True, "legend.framealpha": 0.9,
     "legend.edgecolor": "#CCCCCC",
-    "lines.linewidth": 1.8, "lines.markersize": 5,
-    "figure.dpi": 120, "savefig.dpi": 300, "savefig.bbox": "tight",
-    "figure.constrained_layout.use": True,
-}
-RC_LNCS = {
-    **RC,
-    "axes.titlesize": 9, "axes.labelsize": 8.5, "figure.titlesize": 9,
-    "legend.fontsize": 7.5, "legend.title_fontsize": 8,
-    "xtick.labelsize": 7.5, "ytick.labelsize": 7.5,
     "lines.linewidth": 1.2, "lines.markersize": 3.5,
-    "grid.linewidth": 0.4,
     "pdf.fonttype": 42, "ps.fonttype": 42,
-    "savefig.bbox": None, "savefig.transparent": False,
+    "figure.dpi": 120, "savefig.dpi": 300, "savefig.bbox": None,
+    "savefig.transparent": False,
+    # MUST be False, and this is load-bearing -- see the note below.
+    #
+    # Every figure here lays itself out by hand with `subplots_adjust` and
+    # passes `constrained_layout=False` to `plt.subplots`, which correctly
+    # leaves `fig._layout_engine` as None AT CONSTRUCTION. That opt-out is
+    # not durable across saves. `Figure.savefig` -> `print_figure` wraps the
+    # save in `figure._cm_set(layout_engine='none')`; on exit that context
+    # manager "restores" the captured value by calling
+    # `set_layout_engine(layout=None)`, and THAT method's contract for None
+    # is not "no engine" but "take it from rcParams" -- so with this True it
+    # installs a live ConstrainedLayoutEngine. Measured on matplotlib 3.9.4:
+    # engine None at creation, ConstrainedLayoutEngine after the first
+    # savefig, and on the SECOND savefig the engine executes and silently
+    # discards every `subplots_adjust` (Figure D's axes went from
+    # top=0.800/bottom=0.275 to top=0.936/bottom=0.072).
+    #
+    # That is why a figure's two outputs disagreed: whichever of the PDF and
+    # PNG was written SECOND from the same figure object got the relaid-out
+    # geometry. Order-dependent, not format-dependent. Figures whose titles
+    # are axes children moved with the axes and merely shifted; Figure D's
+    # `fig.text` titles are pinned to fractions computed once from the
+    # correct positions, so they were left sitting inside the axes.
+    "figure.constrained_layout.use": False,
 }
 
-# Final LNCS sizes (style guide section 8, 19 September, verified against
-# the revision's llncs.cls: text width 347.12pt = 4.80in). Draft sizes
-# (lncs=False) are larger only so a screen render is legible while
-# iterating; they carry no meaning for the paper and are never placed in
-# the tex.
+# The figure sizes (style guide section 8, 19 September, verified against
+# the revision's llncs.cls: text width 347.12pt = 4.80in). There is one
+# size per figure, the size it is placed at.
 # Figure A is taller than the style guide's original 2.20in. That height was
 # set for three panels with one-line x-labels and no title; with six rows, a
 # title and two-line labels it left about 1.2in of panel for six rows, so each
@@ -171,44 +191,35 @@ RC_LNCS = {
 # plotting area. The fonts are already at LNCS body size and must not shrink
 # below it, so the height is the free variable. Still half the 7.60in text
 # height, so the figure and its caption sit on one page.
-FIGSIZE_A_LNCS = (4.80, 3.20)
-FIGSIZE_A_DRAFT = (12.0, 5.0)
-FIGSIZE_B_LNCS = (4.80, 4.20)
-FIGSIZE_B_DRAFT = (12.0, 7.0)
-FIGSIZE_C_LNCS = (4.80, 4.20)
-FIGSIZE_C_DRAFT = (12.0, 7.0)
-# 1x3, full width (redesigned 19 September, replaces the old 1x2/2x2
-# pair above): a log-log panel with labelled points (a) sitting next to
-# two log-linear/log-log panels (b, c) needs more height than the style
-# guide's own 1x3 row, (4.80, 1.90) -- that number was set for F0's three
-# histograms, none of which carries axis ticks on two decades or point
-# labels that must clear their own marker. Grown the same way Figures B
-# and C were, empirically, until nothing collided (`fig_d`'s own report).
-# Grown again, 2.00 -> 2.35in, when panel (a)'s point moved from one
-# estimator per DATASET to the four actual ESTIMATOR OBJECTS: MVT S_99
-# and FP now sit within 15% of each other in t, on top of the one-output
-# crossover mark, and 2.00in of height left no room for a legend or a
-# leader line that could clear that cluster without leaving the axes.
-FIGSIZE_D_LNCS = (4.80, 2.35)
+FIGSIZE_A = (4.80, 3.20)
+FIGSIZE_B = (4.80, 4.20)
+FIGSIZE_C = (4.80, 4.20)
+# 2x2, full width (redesigned 20 September, replacing the 1x3 this height
+# was first set for): one panel per estimator object, each carrying a
+# seconds axis along its top and the shared ratio axis along its bottom,
+# so the figure needs room for two rows of tick labels between the panel
+# rows and a third below the last. Grown 2.35 -> 2.45in for exactly that,
+# empirically, until nothing collided -- the same way Figures B and C were
+# sized. Half the 7.60in text height, so figure and caption share a page.
+FIGSIZE_D = (4.80, 2.45)
 
+# Corner-annotation size, the style guide's "annotation: 7pt at final
+# size" row. It is a module constant rather than an rcParam because
 # `plt.rcParams` has no real "annotation.fontsize" key -- the module this
 # replaces called `plt.rcParams.get("annotation.fontsize", 9)` for its
 # corner text, which silently always returned the hardcoded default
 # because that key does not exist and `dict.get` does not validate it, so
-# every corner annotation rendered at 9pt even in LNCS mode, ignoring the
-# style guide's "annotation: 7pt at final size" row. Fixed here with a
-# real module-level switch that `_use_style` sets.
-_STATE = {"annotation_fontsize": 9}
+# every corner annotation rendered at 9pt, ignoring the style guide.
+_ANNOTATION_FONTSIZE = 7
 
 
 def _use_style() -> None:
     # ONE size, the paper's. A figure is built at the inches it is placed
     # at, so \includegraphics takes it 1:1 and its type matches the body
-    # text. A larger "draft" render scaled down by LaTeX would put its
-    # labels at a fraction of their intended size, differently for every
-    # figure, which is the mismatch the style guide exists to prevent.
-    plt.rcParams.update(RC_LNCS)
-    _STATE["annotation_fontsize"] = 7
+    # text. A larger render scaled down by LaTeX would put its labels at a
+    # fraction of their intended size, differently for every figure, which
+    # is the mismatch the style guide exists to prevent.
+    plt.rcParams.update(RC)
 
 
 def _legend(ax_or_fig, title=None, **kw):
@@ -232,10 +243,20 @@ _COORDS = [
          label=r"FP $a$", param=r"$a$", group="FP", axis="logsigma", row=0, col=1),
     dict(dataset="fp", estimator="fp", output="scatter",
          label=r"FP $s$", param=r"$s$", group="FP", axis="logsigma", row=1, col=1),
-    dict(dataset="imf", estimator="imf", output="slope",
-         label=r"IMF $\alpha$", param=r"$\alpha$", group="IMF", axis="logmass", row=0, col=2),
-    dict(dataset="imf", estimator="imf", output="p",
-         label=r"IMF $p$", param=r"$p$", group="IMF", axis="logmass", row=1, col=2),
+    # The IMF column is the Chabrier form (20 September 2026): a lognormal
+    # below a fixed 1 Msun break joined to a power law above, free in
+    # (m_c, sigma, x). Two of its three coordinates are plotted, chosen to
+    # show two different data regimes rather than two views of one: `m_c`,
+    # the characteristic mass, is a location fixed by the data-rich peak,
+    # while `x` is the slope of the sparse high-mass tail. `sigma` is a
+    # peak parameter like `m_c` and would repeat that regime.
+    #
+    # `x` is the index on xi(log m) ~ m^-x, Salpeter x = 1.35 -- NOT the
+    # index on dN/dm, where Salpeter is 2.35. The paper must say which.
+    dict(dataset="imf", estimator="chabrier", output="m_c",
+         label=r"IMF $m_{\rm c}$", param=r"$m_{\rm c}$", group="IMF", axis="logmass", row=0, col=2),
+    dict(dataset="imf", estimator="chabrier", output="x",
+         label=r"IMF $x$", param=r"$x$", group="IMF", axis="logmass", row=1, col=2),
 ]
 
 _AXIS_LABEL = {
@@ -310,6 +331,7 @@ def _load_draws(estimator_dir: str, outputs: list) -> dict:
         outputs=outputs,
         theta_true=df[[f"theta_true_{o}" for o in outputs]].to_numpy(),
         theta_hat=df[[f"theta_hat_{o}" for o in outputs]].to_numpy(),
+        v_btw=df[[f"V_btw_{o}" for o in outputs]].to_numpy(),
         v_tot_hat=df[[f"V_tot_hat_{o}" for o in outputs]].to_numpy(),
         a_bca=df[[f"a_bca_{o}" for o in outputs]].to_numpy(),
         theta_boot=theta_boot,
@@ -331,24 +353,23 @@ def _load_draws(estimator_dir: str, outputs: list) -> dict:
 
 def _qij_lo_hi(loaded: dict, j: int, level: float) -> np.ndarray:
     """(n, 2) [lo, hi] for output index `j`, over every draw in `loaded`,
-    at `level`, from `core.intervals.qij_interval`, clipped to this
-    output's natural parameter support (`estimators.supports_for`,
-    `loaded["outputs"][j]`) -- the one place in this file that support
-    clip is applied, since every figure that draws a QIJ interval calls
-    this rather than `qij_interval` directly. A draw whose `theta_hat`/
-    `V_tot_hat`/`a_bca` is not all finite for this output (a box-rule or
-    QIJ-side failure, plan §36.2 ruling 5) is left NaN rather than passed
-    in -- `qij_interval` would produce NaN from it anyway, but the
-    finiteness check is made explicit here rather than relied on
-    implicitly."""
+    at `level`, from `core.intervals.qij_interval`: the normal interval
+    `theta_hat +/- z sqrt(V_btw)` on the measured between-bin variance.
+    There is no acceleration term and no natural-parameter support clip
+    any more -- an ablation on the main run's products found V_win_hat
+    under 0.6% of the total variance, the median |a_bca| between 0.0002
+    and 0.037, and the clip changing no endpoint on any draw (see
+    `core.intervals.qij_interval`). A draw whose `theta_hat`/`V_btw` is
+    not both finite for this output (a box-rule or QIJ-side failure,
+    plan §36.2 ruling 5) is left NaN rather than passed in --
+    `qij_interval` would produce NaN from it anyway, but the finiteness
+    check is made explicit here rather than relied on implicitly."""
     n = loaded["theta_hat"].shape[0]
-    support = supports_for([loaded["outputs"][j]])
     lo_hi = np.full((n, 2), np.nan)
     for i in range(n):
-        th, v, a = loaded["theta_hat"][i, j], loaded["v_tot_hat"][i, j], loaded["a_bca"][i, j]
-        if np.isfinite(th) and np.isfinite(v) and np.isfinite(a):
-            lo_hi[i] = qij_interval(np.array([th]), np.array([v]), np.array([a]), level,
-                                     support=support)[0]
+        th, v = loaded["theta_hat"][i, j], loaded["v_btw"][i, j]
+        if np.isfinite(th) and np.isfinite(v):
+            lo_hi[i] = qij_interval(np.array([th]), np.array([v]), level)[0]
     return lo_hi
 
 
@@ -491,8 +512,42 @@ def _data_span(lo, hi, include=(), pad: float = 0.06):
     return lo_v - pad * span, hi_v + pad * span
 
 
+def _pretty_ticks(lo: float, hi: float, ref: float = None, target: int = 5) -> list:
+    """Round tick values across [lo, hi], in R's `pretty()` spirit, ANCHORED
+    on `ref` so the panel's reference line always lands on a tick.
+
+    The step is the smallest of {1, 2, 2.5, 5} x 10^k giving at most `target`
+    intervals across the range (5, not 4: at 4 the coverage panel's 0.042-wide
+    range just missed a 0.01 step at 4.2 intervals and fell back to 0.02,
+    which labelled only two of its four round values) -- the same family `pretty()` and matplotlib's
+    `MaxNLocator` choose from. What neither of those guarantees is the
+    anchoring: ticks are generated as `ref + k*step`, not `0 + k*step`, so a
+    reference at 0.95 or 1.0 is always labelled.
+
+    That is what was wrong before. The range came from `_data_span`, which is
+    data-derived and arbitrary (coverage landed on 0.9276-0.9656), and the
+    default locator divided it into a step of 0.015 -- not a round number, and
+    it stepped straight over the 0.95 the panel's own reference line marks.
+    Both 0.95 and 1.0 happen to be multiples of their step here, so an
+    unanchored pretty locator would look right today; it would silently stop
+    being right if a reference moved off a round multiple.
+    """
+    if not (np.isfinite(lo) and np.isfinite(hi)) or hi <= lo:
+        return []
+    span = hi - lo
+    anchor = float(ref) if ref is not None and np.isfinite(ref) else lo
+    exp = np.floor(np.log10(span / max(target, 1)))
+    for mult in (1.0, 2.0, 2.5, 5.0, 10.0):
+        step = mult * 10.0 ** exp
+        if span / step <= target:
+            break
+    k0 = int(np.ceil((lo - anchor) / step))
+    k1 = int(np.floor((hi - anchor) / step))
+    return [anchor + k * step for k in range(k0, k1 + 1)]
+
+
 def _row_panel(ax, rows: list, key_fn, xlabel: str, ref_line, band,
-               panel_lbl: str, show_labels: bool) -> None:
+               panel_lbl: str, show_labels: bool, bars_from: float = None) -> None:
     """The one dot-and-whisker layout Figure A's three panels share: a
     horizontal reference (`ref_line`, e.g. 0, 1.0 or the nominal level),
     an optional shaded tolerance band, and two dodged markers (QIJ above,
@@ -505,21 +560,59 @@ def _row_panel(ax, rows: list, key_fn, xlabel: str, ref_line, band,
     if band is not None:
         ax.axvspan(band[0], band[1], color=BAND["materiality"], zorder=0)
     ax.axvline(ref_line, color=METHOD["truth"]["color"], ls=":", lw=1.0, zorder=1)
-    for key, dy in (("qij", -dodge), ("boot", dodge)):
-        kw = METHOD[key]
-        c, lo_e, hi_e = key_fn(rows, key)
-        xerr = np.vstack([lo_e, hi_e])
-        ax.errorbar(c, y + dy, xerr=xerr, fmt=kw["marker"], color=kw["color"],
-                    ms=ms, capsize=2.5, lw=plt.rcParams["lines.linewidth"] * 0.7,
-                    zorder=2, label=kw["label"])
+    # `bars_from` turns the panel into diverging horizontal bars measured
+    # from that value instead of dodged dot-and-whisker markers. It exists
+    # for the width-ratio panel, whose quantity is a RATIO: a bar encodes
+    # distance from a baseline, and for a ratio the meaningful baseline is 1,
+    # not 0. Drawn from zero every bar would be ~99% of full length and the
+    # differences -- which live in the third decimal -- would be invisible.
+    # From 1 the bar's direction reads directly: left of the line QIJ's
+    # interval is narrower than the bootstrap's, right of it wider.
+    if bars_from is not None:
+        # Every draw is plotted, with the median marked in black on it --
+        # Figure D's idiom (`_d_strip`/`_d_glyph`), reused here rather than
+        # re-invented so the two figures read the same way.
+        #
+        # Three summary forms were tried first and all were worse. A bar from
+        # 1 to the median showed no spread. The same bar with 5-95% whiskers
+        # was unreadable: the whiskers ran about eight times the bar's length.
+        # A box spanning the IQR with a median tick was legible but summarised
+        # a 1000-draw distribution twice over, and choosing its whiskers meant
+        # choosing a convention to explain -- Tukey's 1.5x IQR spans 3.8-4.0x
+        # the box here and brings 3-10 outlier points per row, 5-95% spans
+        # 2.3-2.5x. With this many draws the distribution can simply be shown.
+        for i, r in enumerate(rows):
+            vals = np.asarray(r.get("ratio", []), dtype=float)
+            vals = vals[np.isfinite(vals)]
+            if vals.size:
+                _d_strip(ax, vals, float(i), METHOD["qij"]["color"], rng_seed=i)
+                _d_glyph(ax, vals, float(i), "o", METHOD["qij"]["color"])
+    else:
+        for key, dy in (("qij", -dodge), ("boot", dodge)):
+            kw = METHOD[key]
+            c, lo_e, hi_e = key_fn(rows, key)
+            xerr = np.vstack([lo_e, hi_e])
+            ax.errorbar(c, y + dy, xerr=xerr, fmt=kw["marker"], color=kw["color"],
+                        ms=ms, capsize=2.5, lw=plt.rcParams["lines.linewidth"] * 0.7,
+                        zorder=2, label=kw["label"])
     # The range comes from what is drawn -- both series' whisker ends --
     # widened only far enough to keep the reference line and the tolerance
     # band in view (`_data_span`).
     lo_all, hi_all = [], []
     for key in ("qij", "boot"):
         c, lo_e, hi_e = key_fn(rows, key)
-        lo_all.append(np.asarray(c) - np.asarray(lo_e))
-        hi_all.append(np.asarray(c) + np.asarray(hi_e))
+        if bars_from is not None:
+            # The range comes from the clouds themselves, trimmed at the 1st
+            # and 99th percentile so that a handful of extreme draws cannot
+            # set the axis for all six rows -- the points outside still draw,
+            # they just do not get a vote on the limits.
+            lo_all.append(np.array([np.percentile(np.asarray(r["ratio"], dtype=float), 1)
+                                     for r in rows if np.size(r.get("ratio", []))], dtype=float))
+            hi_all.append(np.array([np.percentile(np.asarray(r["ratio"], dtype=float), 99)
+                                     for r in rows if np.size(r.get("ratio", []))], dtype=float))
+        else:
+            lo_all.append(np.asarray(c) - np.asarray(lo_e))
+            hi_all.append(np.asarray(c) + np.asarray(hi_e))
     keep = [ref_line] + (list(band) if band is not None else [])
     span = _data_span(np.concatenate(lo_all), np.concatenate(hi_all), include=keep)
     if span is not None:
@@ -542,13 +635,24 @@ def _row_panel(ax, rows: list, key_fn, xlabel: str, ref_line, band,
     # where a column shares one x quantity and only the bottom row is
     # labelled.
     ax.set_xlabel(xlabel, labelpad=2, fontweight="bold")
-    # Few x-ticks, and never one hard against either end of the axis.
-    # The three panels sit almost edge to edge (see `fig_a`'s wspace), so a
-    # tick label at a panel's right edge would run into its neighbour's
-    # left-edge label; `prune="both"` drops exactly those two. What is left
-    # still spans the range, and the data, not the axis furniture, gets the
-    # width.
-    ax.xaxis.set_major_locator(plt.MaxNLocator(4, prune="both"))
+    # Round ticks, anchored on this panel's own reference line, and never one
+    # hard against either end of the axis. `MaxNLocator(4, prune="both")` was
+    # here and did the pruning but not the rounding: over `_data_span`'s
+    # data-derived range it chose a step of 0.015 for coverage and stepped
+    # straight over the 0.95 the panel's reference line marks. `_pretty_ticks`
+    # picks a round step AND anchors it on `ref_line`, so the reference is
+    # always labelled; the edge pruning that `prune="both"` gave is kept by
+    # dropping any tick within 4% of either end, which is what stopped a
+    # right-edge label colliding with the neighbouring panel's left-edge one.
+    ticks = _pretty_ticks(*ax.get_xlim(), ref=ref_line)
+    x0, x1 = ax.get_xlim()
+    edge = 0.04 * (x1 - x0)
+    ticks = [t for t in ticks if x0 + edge < t < x1 - edge]
+    if ticks:
+        ax.xaxis.set_major_locator(plt.FixedLocator(ticks))
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:g}"))
+    else:
+        ax.xaxis.set_major_locator(plt.MaxNLocator(4, prune="both"))
     # (4) Bold row labels. They are the figure's only y-axis text and they
     # name the coordinates, so they carry as much as the panel titles do.
     for lbl in ax.get_yticklabels():
@@ -594,13 +698,17 @@ def _a_rows(run_dir: str) -> tuple:
         ratio = ratio[np.isfinite(ratio)]
         if ratio.size:
             rows_c.append(dict(label=c["label"], param=c["param"], group=c["group"],
+                               ratio=ratio,
                                median=float(np.median(ratio)),
+                                p25=float(np.percentile(ratio, 25)),
+                                p75=float(np.percentile(ratio, 75)),
                                 p05=float(np.percentile(ratio, 5)),
                                 p95=float(np.percentile(ratio, 95))))
         else:
+            nan = float("nan")
             rows_c.append(dict(label=c["label"], param=c["param"], group=c["group"],
-                               median=float("nan"),
-                                p05=float("nan"), p95=float("nan")))
+                               ratio=np.array([]),
+                               median=nan, p25=nan, p75=nan, p05=nan, p95=nan))
     return rows_a, rows_b, rows_c
 
 
@@ -615,13 +723,15 @@ def fig_a(run_dir: str) -> plt.Figure:
 
     (a) coverage of both intervals at 0.95, MC-SE whiskers, nominal line.
     (b) width ratio QIJ/bootstrap at 0.95, MEDIAN with 5-95% whiskers,
-    +/-10% band, unity line. Being a median it is unmoved by the natural-
-    support clip (`core.intervals.qij_interval`'s `support`), which acts
-    only on the far tail of the width distribution; Figure C's MEAN
-    interval score is where that clip shows. The two figures therefore
-    disagree about IMF p by construction, not by error: (b) reads 0.67
-    there because QIJ's interval is a third narrower than the bootstrap's
-    at the median -- while covering better, 0.957 against 0.952.
+    unity line. NO materiality band: the +/-10% one drawn here until
+    20 September was passed into `_data_span`'s `include` list, so it
+    forced the axis to span at least itself and could never render as
+    anything but a full-panel grey wash -- it could only have shown as a
+    band if some width ratio fell OUTSIDE +/-10%, i.e. only when the
+    method was doing badly. Dropping it lets the axis close onto the data,
+    which is what makes the coordinates distinguishable. Its one claim,
+    that every coordinate is within 10% of the bootstrap's width, belongs
+    in the caption.
 
     The variance panel, log(V_hat_tot/V_MC) against log(V_boot/V_MC), was
     REMOVED by the author on 19 September 2026 (figure spec, "Figure A"):
@@ -637,7 +747,7 @@ def fig_a(run_dir: str) -> plt.Figure:
     nothing panel (a) did not already say.
     """
     _use_style()
-    figsize = FIGSIZE_A_LNCS
+    figsize = FIGSIZE_A
     # rows_a (the variance ratio) is still built -- one pass over the
     # coordinates makes all three -- but no longer plotted.
     _rows_a, rows_b, rows_c = _a_rows(run_dir)
@@ -651,8 +761,8 @@ def fig_a(run_dir: str) -> plt.Figure:
         e = np.where(np.isfinite(se), 1.96 * se, 0.0)
         return c, e, e
 
-    _row_panel(axes[0], rows_b, key_b, "(a) Empirical Coverage",
-               ref_line=_LEVEL, band=None, panel_lbl="(a)", show_labels=True)
+    _row_panel(axes[0], rows_b, key_b, "a. Empirical Coverage",
+               ref_line=_LEVEL, band=None, panel_lbl="a.", show_labels=True)
 
     def key_c(rows, method):
         # width ratio has only one series (QIJ/bootstrap is already a
@@ -661,13 +771,27 @@ def fig_a(run_dir: str) -> plt.Figure:
         if method == "boot":
             nan = np.full(len(rows), np.nan)
             return nan, nan, nan
+        # The IQR, not the 5-95% range: this panel draws a BAR spanning it,
+        # so the two returned offsets are the bar's ends measured from the
+        # median that sits on it.
         c = np.array([r["median"] for r in rows])
-        lo = c - np.array([r["p05"] for r in rows])
-        hi = np.array([r["p95"] for r in rows]) - c
+        lo = c - np.array([r["p25"] for r in rows])
+        hi = np.array([r["p75"] for r in rows]) - c
         return c, lo, hi
 
-    _row_panel(axes[1], rows_c, key_c, "(b) Width: QIJ/Boot",
-               ref_line=1.0, band=(0.90, 1.10), panel_lbl="(b)", show_labels=False)
+    # NO materiality band. It was +/-10% around 1, and `_row_panel` passes a
+    # band's edges into `_data_span`'s `include` list -- so the band forced the
+    # axis to span at least itself and could never render as anything but a
+    # full-panel grey wash. It could only have shown as a band if some width
+    # ratio fell OUTSIDE +/-10%, i.e. only when the method was doing badly.
+    # Dropping it also lets the axis collapse onto the data (0.948-1.087
+    # rather than 0.90-1.10), which is what makes the differences between
+    # coordinates legible instead of squashed into the middle third. Its one
+    # claim -- that every coordinate is within 10% of the bootstrap's width --
+    # belongs in the caption, where it is a sentence rather than a grey box.
+    _row_panel(axes[1], rows_c, key_c, "b. Width: QIJ/Boot",
+               ref_line=1.0, band=None, panel_lbl="b.", show_labels=False,
+               bars_from=1.0)
     # Panel (c) plots one series (the ratio already compares the two
     # methods); its "boot" errorbar call above drew nothing (all-NaN), so
     # nothing further is needed here -- the figure-level legend below
@@ -681,17 +805,24 @@ def fig_a(run_dir: str) -> plt.Figure:
     # than the half-panel gutter the default gives.
     fig.subplots_adjust(left=0.155, right=0.985, top=0.905, bottom=0.175, wspace=0.11)
 
-    # (3) The legend is an inset on the middle panel rather than a band under
-    # the figure: that band cost about a fifth of the height and, at the LNCS
-    # size, height is the scarce dimension. Panel (b) is the one with room --
-    # its data sit in a narrow strip near the nominal line, so the lower-left
-    # corner is empty in a way (a)'s and (c)'s are not.
+    # (3) The legend sits in the figure's bottom-left MARGIN, under the last
+    # row label, not inside a panel. Inset on panel (a) at `lower left` it
+    # covered the `IMF x` row's own markers -- the corner it was placed in was
+    # empty on an earlier run's numbers and is not empty now. The margin below
+    # the y-tick labels is the one region of this figure that holds nothing at
+    # any numbers: `subplots_adjust`'s left (0.155) and bottom (0.175) reserve
+    # it for the labels, and the labels stop above it.
     handles = [Line2D([], [], color=METHOD[k]["color"], ls="none",
                        marker=METHOD[k]["marker"], label=METHOD[k]["label"])
                for k in ("qij", "boot")]
-    axes[0].legend(handles=handles, loc="lower left", frameon=True,
-                   framealpha=0.9, borderpad=0.3, handletextpad=0.4,
-                   fontsize=plt.rcParams["legend.fontsize"])
+    # y = 0.049, not 0.004: measured, that puts the legend's lower edge on the
+    # panel x-labels' own baseline (0.0656 in figure coords) instead of 0.045
+    # below it, so it no longer hangs past the bottom of the figure's text.
+    # Its top then reaches 0.163, still clear of the panels at 0.175.
+    fig.legend(handles=handles, loc="lower left", bbox_to_anchor=(0.004, 0.049),
+               frameon=True, framealpha=0.9, borderpad=0.3, labelspacing=0.3,
+               handletextpad=0.4, handlelength=1.0,
+               fontsize=plt.rcParams["legend.fontsize"])
     return fig
 
 
@@ -730,10 +861,17 @@ def _b_series(pts: pd.DataFrame, protos: pd.DataFrame, output: str) -> tuple:
 
 
 # Figure B plots one point per data point -- N = 2000 per panel -- so the
-# markers are small and translucent and density reads as depth. Rasterized, so
-# twelve thousand vector circles do not go into the PDF.
-_B_POINT_SIZE = 4.0
-_B_POINT_ALPHA = 0.60
+# markers are small and translucent and density reads as depth. NOT
+# rasterized: the points are the figure's content and stay vectors, sharp at
+# any zoom and at any print resolution. Nothing in this module rasterizes.
+#
+# `_B_POINT_SIZE` is matplotlib's `s`, an AREA in points squared, so the
+# 4.0 -> 4.84 step is 10% on the marker's DIAMETER (1.1 squared), not 10% on
+# the number. Alpha raised 0.60 -> 0.72 with it: the points are a little more
+# opaque, while still letting the dense stretches along the diagonal read as
+# depth rather than as one solid line.
+_B_POINT_SIZE = 4.84
+_B_POINT_ALPHA = 0.72
 
 # When a panel's range is set by the bulk rather than by the extremes.
 #
@@ -790,13 +928,18 @@ def _plot_b_panel(ax, psi, psi_hat, title, panel_lbl) -> None:
         ax.set_ylim(*span)
         ax.plot(span, span, color=METHOD["truth"]["color"], ls=":", lw=1.0, zorder=1)
 
-    ax.scatter(psi_hat, psi, s=_B_POINT_SIZE, facecolors=METHOD["qij"]["color"],
-               edgecolors="none", alpha=_B_POINT_ALPHA, zorder=2, rasterized=True)
+    # Purple, not QIJ's blue. The refined influence is an INPUT to QIJ, not
+    # the method's answer: every other figure's blue marks an interval QIJ
+    # produced, and colouring this the same would claim these points are one
+    # of those. `OI["purple"]` is the palette's remaining categorical colour
+    # and is used nowhere else now that Figure D's dataset colouring is gone.
+    ax.scatter(psi_hat, psi, s=_B_POINT_SIZE, facecolors=OI["purple"],
+               edgecolors="none", alpha=_B_POINT_ALPHA, zorder=2)
     ax.set_title(f"{panel_lbl} {title}")
     ax.xaxis.set_major_locator(plt.MaxNLocator(4))
     ax.yaxis.set_major_locator(plt.MaxNLocator(4))
 
-    fs = _STATE["annotation_fontsize"] - 1.0
+    fs = _ANNOTATION_FONTSIZE - 1.0
     if psi.size >= 2 and np.std(psi) > 0 and np.std(psi_hat) > 0:
         r = float(pearsonr(psi_hat, psi)[0])
         text = f"$r={r:.3f}$"
@@ -826,7 +969,7 @@ def fig_b(run_dir: str) -> plt.Figure:
     KeyError three lines into `_b_series`.
     """
     _use_style()
-    figsize = FIGSIZE_B_LNCS
+    figsize = FIGSIZE_B
     fig, axes = plt.subplots(2, 3, figsize=figsize, constrained_layout=False)
 
     for c in _COORDS:
@@ -1117,7 +1260,7 @@ def fig_c(run_dir: str) -> plt.Figure:
     must not shrink to whatever the comparison set happens to keep.
     """
     _use_style()
-    figsize = FIGSIZE_C_LNCS
+    figsize = FIGSIZE_C
     fig, axes = plt.subplots(2, 3, figsize=figsize, constrained_layout=False)
 
     for c in _COORDS:
@@ -1175,26 +1318,53 @@ def fig_c(run_dir: str) -> plt.Figure:
         pt = _c_qij_point(loaded, j, w_true["w"], theta_true, _LEVEL, mask=common)
         _plot_c_panel(ax, curve, pt, float(ideal), c["label"], panel_lbl)
 
-    fig.subplots_adjust(left=0.125, right=0.99, top=0.945, bottom=0.115,
+    fig.subplots_adjust(left=0.135, right=0.99, top=0.945, bottom=0.130,
                          hspace=0.42, wspace=0.34)
-    fig.supxlabel("Full-data evaluations", fontsize=plt.rcParams["axes.labelsize"],
+    # "Estimator calls (size N)", not "Full-data evaluations". The axis is a
+    # COUNT OF EVALUATIONS OF THE ESTIMATOR, each on a dataset of size N: for
+    # the bootstrap it is literally b, its number of size-N resamples; for QIJ
+    # it is `normalized_rows`, the total rows handed to the estimator divided
+    # by N, because QIJ's prototype stage evaluates on M_X rows rather than N
+    # and the two have to be in one unit to share an axis. "Full-data" named
+    # that normalisation rather than the thing being counted.
+    # y pinned: the legend sits below this label, so the two have to be given
+    # separate bands. Measured, the default put both in 0.008-0.062 and they
+    # printed on top of one another.
+    fig.supxlabel("Estimator Calls (size $N$)", y=0.040,
+                  fontsize=plt.rcParams["axes.labelsize"],
                   fontweight="bold")
-    fig.supylabel("Interval score / $w_{true}$", fontsize=plt.rcParams["axes.labelsize"], fontweight="bold")
+    # Normalized by the score of the SAMPLING DISTRIBUTION'S OWN 95% interval
+    # (theta_hat's 2.5/97.5 quantiles over the draws, `_c_w_true`). That
+    # interval contains the truth by construction, so it takes no penalty and
+    # its score is exactly its width -- the divisor is a score like the
+    # numerator, and the ratio is a plain normalisation. Hence 1.0, the dotted
+    # line in every panel. Lower is better, and 1 is not a hard floor: a
+    # deliberately narrow interval can score under it when its misses stay
+    # small, so the caption must not claim otherwise.
+    fig.supylabel("Normalized Interval Score",
+                  fontsize=plt.rcParams["axes.labelsize"] * 0.92, fontweight="bold")
 
-    # (3) The legend is an inset on panel (a), MVT nu, upper right -- the
-    # same placement the module this replaces used, and it still holds:
-    # at large b/normalized-rows the curve and the QIJ marker have both
-    # settled near their low plateau on this coordinate, so the upper
-    # right corner (large x, large y) is the one region no series ever
-    # reaches, on every build. As in Figure A, one legend for the figure.
-    h1 = Line2D([], [], color=METHOD["boot"]["color"], ls=METHOD["boot"]["ls"],
-                lw=plt.rcParams["lines.linewidth"] * 0.7, label="Boot (mean $\\pm$ SE)")
-    h2 = Line2D([], [], marker=METHOD["qij"]["marker"], color=METHOD["qij"]["color"], ls="none",
-                ms=plt.rcParams["lines.markersize"] * 1.1, label="QIJ (mean $\\pm$ SE)")
-    axes[0, 0].legend(handles=[h1, h2], loc="upper right", ncol=1,
-                      frameon=True, framealpha=0.9, borderpad=0.3,
-                      handletextpad=0.4, labelspacing=0.3,
-                      fontsize=plt.rcParams["legend.fontsize"])
+    # TWO legends, flanking the x-label on its own line rather than a band
+    # beneath it. One band cost a whole line of height for two keys that sit
+    # side by side anyway, and height is the scarce dimension at this size.
+    # The x-label is centred and about a third of the figure wide, so the
+    # margins either side of it are free at any numbers -- unlike the panel
+    # corner the legend sat in before, which was empty only on an earlier
+    # run's numbers and had the bootstrap curve running through it by this one.
+    h_boot = Line2D([], [], color=METHOD["boot"]["color"], ls=METHOD["boot"]["ls"],
+                    lw=plt.rcParams["lines.linewidth"] * 0.6, label="Boot (mean $\\pm$ SE)")
+    h_qij = Line2D([], [], marker=METHOD["qij"]["marker"], color=METHOD["qij"]["color"],
+                   ls="none", ms=plt.rcParams["lines.markersize"] * 0.9,
+                   label="QIJ (mean $\\pm$ SE)")
+    # Smaller than the body legend size and smaller marks with it: these two
+    # sit on the same line as the x-label, and at equal weight they competed
+    # with it instead of reading as annotations flanking it.
+    _kw = dict(frameon=False, handletextpad=0.35, borderaxespad=0.0, borderpad=0.0,
+               fontsize=plt.rcParams["legend.fontsize"] * 0.88)
+    fig.legend(handles=[h_boot], loc="center right", bbox_to_anchor=(0.325, 0.048),
+               handlelength=1.8, **_kw)
+    fig.legend(handles=[h_qij], loc="center left", bbox_to_anchor=(0.675, 0.048),
+               handlelength=1.0, **_kw)
     return fig
 
 
@@ -1411,7 +1581,7 @@ def _plot_d_pay(ax, timing_dir: str, panel_lbl: str) -> None:
     ax.plot(x_grid, _D_TIMING_B * x_grid, color=METHOD["boot"]["color"],
             ls=METHOD["boot"]["ls"], lw=plt.rcParams["lines.linewidth"], zorder=2)
 
-    fs = _STATE["annotation_fontsize"]
+    fs = _ANNOTATION_FONTSIZE
     # The theoretical lines' own tags sit at 62% of the log range, not at
     # the right edge the module this replaces used: with the four points
     # now mvt/nu, mvt/tail, fp/fp, imf/imf (below), x_hi is set by the
@@ -1537,7 +1707,7 @@ def _plot_d_ratio_n(ax, fp_series: dict, imf_series, panel_lbl: str) -> None:
     Fundamental Plane the other way around, and the horizontal line at
     1.0 is what makes both readable as a single "who pays, and when"
     picture rather than two disconnected facts."""
-    fs = _STATE["annotation_fontsize"]
+    fs = _ANNOTATION_FONTSIZE
     lo_all, hi_all = [], []
     for key, series, label in (("fp", fp_series, "FP"), ("imf", imf_series, "IMF")):
         if series is None:
@@ -1638,7 +1808,7 @@ def _plot_d_accuracy(ax, fp_series: dict, imf_series, level: float, panel_lbl: s
     re-explained. Each dataset is still named directly at its own right
     end, the idiom style guide section 6/F4 uses for `d_eff`, rather than
     a second legend."""
-    fs = _STATE["annotation_fontsize"]
+    fs = _ANNOTATION_FONTSIZE
     Ns_fp = fp_series["Ns"]
     fp_color = _D_DATASET_COLOR["fp"]
     lo_all, hi_all = [], []
@@ -1673,87 +1843,314 @@ def _plot_d_accuracy(ax, fp_series: dict, imf_series, level: float, panel_lbl: s
     ax.set_title(f"{panel_lbl} Accuracy vs $N$")
 
 
-def fig_d(run_dirs: dict, timing_dir: str, imf_run_dirs: dict = None,
-          level: float = _LEVEL) -> plt.Figure:
-    """Figure D -- cost (spec section "Figure D", redesigned by the author
-    19 September 2026, replaces F10 entirely; panels (a), (b) and (c)'s
-    colours corrected in a second pass, same date, after the author found
-    the render unreadable -- see each panel function's own docstring for
-    what changed and why). 1x3 panels at full width, one measure per
-    panel, ONE legend for the whole figure, no printed numbers inside the
-    panels.
 
-    `run_dirs`: {N: product_dir} for the Fundamental Plane cost-vs-N
-    sweep -- panel (b)'s FP line and FP's half of panel (c) -- built the
-    same way `scripts/make_figures.py`'s `_cost_dirs` already builds it
-    (globbing for `N<size>/truth.parquet`).
-    `timing_dir`: the timing run's root (20 draws, one worker one thread,
-    `<root>/<dataset>/<estimator>/`) -- panel (a)'s only input; the one
-    place in this file that ever reads or plots an absolute wall time
-    (`_d_ratio_n`'s docstring explains why panel (b) does not, any more).
-    `imf_run_dirs`: optional {N: product_dir} for an IMF cost-vs-N sweep;
-    when given, it supplies panel (b)'s IMF ratio line AND panel (c)'s
-    IMF M* coverage line -- one input feeding both panels now, where
-    before only panel (c) read it. Both panels degrade gracefully to
-    their Fundamental-Plane-only form when it is omitted.
+# ---------------------------------------------------------------------------
+# Figure D -- wall time per draw, and the QIJ/bootstrap ratio
+# ---------------------------------------------------------------------------
 
-    (a) When QIJ pays -- `_plot_d_pay`: the four ESTIMATOR OBJECTS the
-        paper's six coordinates map to (mvt/nu, mvt/tail, fp/fp,
-        imf/imf), not one estimator per dataset -- Pareto, which no
-        other figure shows, is gone.
-    (b) Cost against N -- `_plot_d_ratio_n`: the within-draw QIJ/
-        bootstrap wall-time RATIO against N, not absolute wall time --
-        the cost sweeps are contended (45-100 workers to a node), so
-        only the ratio within a draw is a defensible quantity from them.
-        One line per dataset (FP, IMF), both plotted together so the
-        panel does not read as "QIJ is uniformly more expensive" from
-        the one dataset (FP) where it is.
-    (c) Accuracy against N -- `_plot_d_accuracy`: FP and IMF M* recoloured
-        apart (green/purple, `_D_DATASET_COLOR`) instead of sharing QIJ's
-        blue; method now carried by line style and marker shape alone.
+# One row per ESTIMATOR OBJECT. A QIJ fit and a bootstrap each produce all of
+# an estimator's outputs at once, so wall time is a property of the estimator,
+# not of the estimand: the paper's six plotted coordinates map onto these four
+# rows (FP contributes `a` and `s`, the IMF `m_c` and `x`). The output count is
+# named in the label wherever a row covers more than one, the convention the
+# superseded F7(b) used ("FP (4 outputs)"). Pareto is deliberately absent, as
+# it is from Figures A, B and C -- Figure D introduces no row no other figure
+# shows.
+_D_ROWS = [
+    dict(dataset="mvt", estimator="nu", label=r"MVT $\nu$"),
+    dict(dataset="mvt", estimator="tail", label=r"MVT $S_{99}$"),
+    dict(dataset="fp", estimator="fp", label="FP (all estimands)"),
+    dict(dataset="imf", estimator="chabrier", label="IMF (all estimands)"),
+]
 
-    Dropped from the old design (spec): the width ratio against N and the
-    bound-hit fractions against N, each one sentence in the text rather
-    than a plotted series. The old design's twin-axis machinery that drew
-    them (`_raise_primary_axis`, `OUTPUT_COLORS`, `SECONDARY`) is removed
-    with them -- nothing in this rebuild needs a twin axis at all.
+# median, and the two whisker tiers: IQR drawn thick, 5-95% drawn thin.
+_D_PCTL = (5.0, 25.0, 50.0, 75.0, 95.0)
+_D_DODGE = 0.17
+_D_STRIP_H = 0.115   # half-height of the per-draw strip's vertical jitter
+
+
+def _d_wall(run_dir: str, dataset: str, estimator: str) -> dict:
+    """Per-draw wall times for one estimator object, and their ratio.
+
+    `wall_time_total` from `qij.parquet` is QIJ's whole fit -- quantizer,
+    influence model, psi0, uncertainty, full-data stage and refinement --
+    and `boot.h5`'s `wall_time` is the B-replicate loop. Neither includes
+    building the interval itself (`qij_interval` 233us, `percentile_interval`
+    784us at B=2000, both about 0.001% of their method's time, measured),
+    nor the point estimate, which `study.py` computes outside both timers.
+    The exclusion is therefore symmetric.
+
+    `boot.h5` is ordered by its own `s`, which need not match `qij.parquet`'s
+    row order under joblib's out-of-order completion, so it is sorted before
+    the two are paired. The ratio is formed PER DRAW and summarised after --
+    a median of ratios, not a ratio of medians -- because numerator and
+    denominator share a draw and a process, so that pairing cancels machine
+    noise the two marginals still carry.
+    """
+    path = _product_dir(run_dir, dataset, estimator)
+    q = pd.read_parquet(os.path.join(path, "qij.parquet"))
+    with h5py.File(os.path.join(path, "boot.h5"), "r") as f:
+        bw = np.asarray(f["wall_time"][:], dtype=float)
+        bs = np.asarray(f["s"][:])
+    bw = bw[np.argsort(bs)][:len(q)]
+    qs = np.asarray(q["wall_time_total"], dtype=float)
+    ok = np.isfinite(qs) & np.isfinite(bw) & (bw > 0) & (qs > 0)
+    return dict(qij=qs[ok], boot=bw[ok], ratio=qs[ok] / bw[ok], n=int(ok.sum()))
+
+
+def _log_ticks(lo: float, hi: float, target: int = 4) -> list:
+    """Round tick values spanning [lo, hi] on a log axis, at whatever
+    resolution the span needs.
+
+    A fixed 1-2-5 set is too coarse for a narrow row: the MVT panels span
+    well under a decade and got one or two ticks from it. The mantissa sets
+    below are tried coarsest first and the first to yield `target` ticks
+    wins, so a decade-wide row still reads 1, 2, 5 while a half-decade one
+    gets 0.4, 0.5, 0.7, 1.
+    """
+    if not (np.isfinite(lo) and np.isfinite(hi)) or lo <= 0 or hi <= lo:
+        return []
+    for mant in ((1.0, 2.0, 5.0),
+                 (1.0, 1.5, 2.0, 3.0, 5.0, 7.0),
+                 (1.0, 1.2, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, 8.0)):
+        out = []
+        e = int(np.floor(np.log10(lo)))
+        while 10.0 ** e <= hi:
+            out += [m * 10.0 ** e for m in mant if lo <= m * 10.0 ** e <= hi]
+            e += 1
+        if len(out) >= target:
+            return out
+    return out
+
+
+def _d_strip(ax, x, y: float, color: str, rng_seed: int = 0) -> None:
+    """All 1000 per-draw values as a translucent strip beneath the summary
+    glyph, jittered vertically so coincident values separate.
+
+    This is the density the panels wanted and a violin could not give them:
+    a KDE needs vertical room these panels do not have, while a strip renders
+    at any height, fills the horizontal region where the data actually is,
+    and shows skew and outliers without a smoothing choice. Deterministic
+    jitter -- a fixed seed -- so the figure is reproducible. Drawn as
+    vectors, not rasterized: the points are the figure's actual content and
+    must stay sharp at print resolution.
+    """
+    rng = np.random.default_rng(rng_seed)
+    jit = rng.uniform(-_D_STRIP_H, _D_STRIP_H, size=len(x))
+    ax.plot(x, np.full(len(x), y) + jit, ls="none", marker="o", ms=1.1,
+            color=color, alpha=0.13, mec="none", zorder=1.5)
+
+
+def _d_glyph(ax, x, y: float, marker: str, color: str) -> None:
+    """The summary mark: the median alone, in black, over its own strip.
+
+    The IQR and 5-95% tiers this used to draw are gone -- with every draw
+    already plotted as a point, a bar and whisker restate what the cloud
+    shows and clutter the rows where the cloud is tight. Black keeps the
+    median reading as an annotation ON the cloud rather than as one more
+    member of it. `color` is accepted and unused: the series is identified
+    by its cloud, and an outline in the series colour was tried and dropped
+    for muddying the mark at this size.
+    """
+    ax.plot([float(np.median(x))], [y], marker=marker, color=OI["black"],
+            ms=plt.rcParams["lines.markersize"] * 1.15, mec="none",
+            ls="none", zorder=4)
+
+
+def _d_facet(ax, st: dict, panel_lbl: str):
+    """One estimator's facet, carrying TWO INDEPENDENT x scales.
+
+    Three markers on two scales, with marker colour the cue for which scale
+    each belongs to:
+
+      * blue (QIJ) and orange (Boot) are ABSOLUTE SECONDS, read against the
+        twin axis at the top, whose limits are local to this row.
+      * green (Ratio) is QIJ/Boot, read against the shared axis at the
+        bottom, which every facet has in common.
+
+    The two scales are deliberately NOT a rescaling of one another -- the
+    seconds axis is fitted to this row's own data while the ratio axis is
+    shared -- so the green marker does not coincide with the blue one and
+    carries information neither of the others does.
+
+    Returns the twin so `fig_d` can set its scale and ticks once the shared
+    ratio axis is final.
+    """
+    ratio = st["qij"] / st["boot"]          # per draw, the paired quantity
+    # Green, matching the ratio series: the line marks ratio = 1 on the
+    # PRIMARY axis, so it is the green marker it is there to be compared
+    # against. In black it read as a neutral panel divider, and in panel (a)
+    # it sits near the orange marker's seconds position by coincidence,
+    # inviting exactly the wrong pairing.
+    ax.axvline(1.0, color=OI["green"], ls=":", lw=1.1, zorder=1)
+    _d_strip(ax, ratio, -_D_DODGE * 1.7, OI["green"], rng_seed=2)
+    _d_glyph(ax, ratio, -_D_DODGE * 1.7, "s", OI["green"])
+
+    sec = ax.twiny()
+    _d_strip(sec, st["qij"], _D_DODGE * 1.7, METHOD["qij"]["color"], rng_seed=0)
+    _d_strip(sec, st["boot"], 0.0, METHOD["boot"]["color"], rng_seed=1)
+    _d_glyph(sec, st["qij"], _D_DODGE * 1.7, "o", METHOD["qij"]["color"])
+    _d_glyph(sec, st["boot"], 0.0, "o", METHOD["boot"]["color"])
+
+    for a in (ax, sec):
+        a.set_ylim(-0.72, 1.05)
+        a.set_yticks([])
+        a.grid(False)
+        # A closed box, and ticks turned inward, on BOTH axes: the twin draws
+        # its own spines over the primary's, so enabling the top spine on the
+        # primary alone leaves the top of the panel open.
+        for side in ("top", "right", "bottom", "left"):
+            a.spines[side].set_visible(True)
+            a.spines[side].set_linewidth(0.8)
+        a.tick_params(axis="x", direction="in", length=3.0)
+    sec.tick_params(axis="x", labelsize=plt.rcParams["xtick.labelsize"] * 0.8,
+                    pad=2.0, direction="in", length=3.0)
+
+    # The panel label sits INSIDE the box: in a 2x2 the space left of the
+    # right-hand column is a gutter between panels, and a label there reads
+    # as belonging to neither. The y-range carries headroom above the top
+    # marker for exactly this.
+    ax.text(0.025, 0.93, f"{panel_lbl} {st['label']}", transform=ax.transAxes,
+            ha="left", va="top", fontweight="bold",
+            fontsize=plt.rcParams["axes.labelsize"] * 0.78, zorder=5)
+
+    # The SECONDS range is per panel -- nobody compares MVT nu's 0.39 s to
+    # the IMF's 14.4 s, and a shared one would leave every panel empty. The
+    # RATIO range is not: it is dimensionless, so position means the same
+    # thing in every panel, and sharing it is what lets a reader see at a
+    # glance that the IMF sits far left and the Fundamental Plane far right.
+    # Floating it per panel was tried and reverted: it put the unity line in
+    # a different place in each panel, made (a) and (d) look alike at 0.37
+    # and 0.23, and invited position comparisons that were no longer valid.
+    # `fig_d` sets the shared one from the ranges returned here.
+    s_lo = min(np.percentile(st["qij"], 1), np.percentile(st["boot"], 1))
+    s_hi = max(np.percentile(st["qij"], 99), np.percentile(st["boot"], 99))
+    r_lo = min(float(np.percentile(ratio, 1)), 1.0)
+    r_hi = max(float(np.percentile(ratio, 99)), 1.0)
+    return sec, s_lo, s_hi, r_lo, r_hi
+
+
+def fig_d(run_dir: str, level: float = _LEVEL) -> plt.Figure:
+    """Figure D -- wall time (redesigned by the author, 20 September 2026,
+    replacing the 1x3 cost/accuracy/ratio-against-N design entirely).
+
+    Answers one question: how long does QIJ take to run, against the
+    standard bootstrap, for the estimators the paper plots.
+
+    One column of facets, ONE PER ESTIMATOR OBJECT (`_D_ROWS`): a QIJ fit
+    and a bootstrap each produce all of an estimator's outputs at once, so
+    wall time belongs to the estimator, not the estimand -- FP's four
+    outputs come from a single fit and the IMF's three from another, and
+    the paper's six plotted coordinates collapse to these four rows.
+    Pareto is absent, as it is from every other figure.
+
+    Each facet carries BOTH quantities on one set of markers: a linear
+    seconds axis below, scaled to that row alone, and a secondary axis
+    above reading the identical positions as a QIJ/Boot ratio. That is
+    what replaced a two-panel side-by-side layout, whose second panel
+    duplicated the first panel's geometry to show a number the first panel
+    already encoded as a gap -- and spent half the figure's width doing it.
+
+    Bars were considered and rejected: a bar encodes distance from a
+    baseline, and the useful baseline here is the other method, not zero.
+    Violins and ridges likewise: measured over the 1000 draws every one of
+    these distributions is unimodal with an IQR of 3-12% of its median, so
+    a density has nothing to reveal.
+
+    `run_dir` is the main study's product root and the figure's ONLY input:
+    no cost-against-N sweep, no separate timing run. Both per-draw times
+    come from products already there -- `qij.parquet`'s `wall_time_total`
+    and `boot.h5`'s `wall_time` -- where a draw's QIJ and its bootstrap ran
+    back to back in one process with one BLAS thread, so the ratio within a
+    draw cancels the machine. The dedicated 20-draw timing run is NOT used:
+    at 20 draws it disagreed with these 1000 by up to 0.35 on the cheap
+    estimators, a sample-size effect rather than a contention one (checked:
+    a fresh process's first draw is not anomalous).
+
+    Two facts the caption must carry, neither visible in the figure:
+      * the denominator is the bootstrap at B = 2000; at B = 1000 every
+        ratio on the top axes doubles. The seconds axes are immune, which
+        is why both are drawn.
+      * both methods parallelise, and the BOOTSTRAP PARALLELISES MORE
+        COMPLETELY -- its B replicates are fully independent, while QIJ's
+        refinement is a sequential queue (4-103 evaluations deep here).
+        These are single-core numbers, which measure total work.
     """
     _use_style()
-    figsize = FIGSIZE_D_LNCS
-    fig, axes = plt.subplots(1, 3, figsize=figsize, constrained_layout=False)
+    rows = _D_ROWS
+    # NOT sharex: each panel's ratio range now floats to its own data (every
+    # one still spanning 1), which is what stops three of the four panels
+    # being mostly empty in order to reach the Fundamental Plane's 3.7. The
+    # price is a set of ratio tick labels per panel rather than one per
+    # column, and the green markers are no longer comparable BY POSITION
+    # across panels -- they are read against each panel's own unity line.
+    fig, axes2d = plt.subplots(2, 2, figsize=FIGSIZE_D,
+                                constrained_layout=False)
+    axes = axes2d.ravel()          # a, b across the top; c, d beneath
 
-    _plot_d_pay(axes[0], timing_dir, "a.")
+    stats = [dict(r, **_d_wall(run_dir, r["dataset"], r["estimator"])) for r in rows]
+    facets = [_d_facet(ax, st, f"{chr(ord('a') + i)}.")
+              for i, (ax, st) in enumerate(zip(axes, stats))]
 
-    fp_ratio = _d_ratio_n(run_dirs)
-    imf_ratio = _d_ratio_n(imf_run_dirs) if imf_run_dirs else None
-    _plot_d_ratio_n(axes[1], fp_ratio, imf_ratio, "b.")
+    # One ratio scale for every panel, padded tightly. The old design's
+    # emptiness came from its 0.70x/1.45x padding, not from sharing: at
+    # 0.92x/1.09x the shared range is barely wider than the data it has to
+    # cover, and the comparability is kept.
+    r_lo = min(f[3] for f in facets)
+    r_hi = max(f[4] for f in facets)
+    r_ticks = _log_ticks(r_lo * 0.92, r_hi * 1.09)
+    for i, ax in enumerate(axes):
+        ax.set_xscale("log")
+        ax.set_xlim(r_lo * 0.92, r_hi * 1.09)
+        ax.xaxis.set_major_locator(plt.FixedLocator(r_ticks))
+        ax.xaxis.set_minor_locator(plt.NullLocator())
+        # Only the bottom row is labelled: the scale is identical in all four.
+        ax.set_xticklabels([f"{t:g}" for t in r_ticks] if i >= 2 else [])
 
-    fp_cov = _d_fp_coverage_n(run_dirs, level)
-    imf_cov = _d_imf_mstar_coverage_n(imf_run_dirs, level) if imf_run_dirs else None
-    _plot_d_accuracy(axes[2], fp_cov, imf_cov, level, "c.")
+    for sec, s_lo, s_hi, _, _ in facets:
+        sec.set_xscale("log")
+        sec.set_xlim(s_lo * 0.92, s_hi * 1.09)
+        ticks = _log_ticks(s_lo * 0.92, s_hi * 1.09)
+        sec.xaxis.set_major_locator(plt.FixedLocator(ticks))
+        sec.xaxis.set_minor_locator(plt.NullLocator())
+        sec.set_xticklabels([f"{t:g}" for t in ticks])
 
-    fig.subplots_adjust(left=0.085, right=0.98, top=0.88, bottom=0.20, wspace=0.45)
+    # Applied last and to every axis, primary and twin, major and minor: set
+    # inside `_d_facet` alone it was silently undone for the bottom row,
+    # whose labelled ticks rendered outside the box.
+    for a in list(axes) + [f[0] for f in facets]:
+        a.tick_params(axis="x", which="both", direction="in", length=3.0,
+                      labelsize=plt.rcParams["xtick.labelsize"] * 0.8)
 
-    # ONE legend for the whole figure -- QIJ/Boot markers in their
-    # reserved colours, moved to panel (a) (was panel (b), in the design
-    # this replaces): panel (a) is now the only panel actually drawn in
-    # those two colours, since panels (b) and (c) both recolour by
-    # dataset instead (their own docstrings). Panels (b) and (c) name
-    # their series directly at each line's end rather than repeating a
-    # second legend, so this is still the figure's only one. Placed
-    # lower right, below the bootstrap line's own descent toward small t:
-    # every line and every point here sits at or above roughly 0.1s, and
-    # the bootstrap line does not cross below that until well past the
-    # smallest plotted t, so the panel's bottom right corner has nothing
-    # in it at this run's numbers -- checked by rendering, not assumed
-    # (`upper left`, tried first, sat on top of the MVT nu label and the
-    # QIJ lines' own low-t plateau, which is NOT flat at zero the way an
-    # empty log-log corner would be).
-    handles = [Line2D([], [], color=METHOD[k]["color"], ls=METHOD[k]["ls"],
-                       marker=METHOD[k]["marker"], label=METHOD[k]["label"])
-               for k in ("qij", "boot")]
-    _legend(axes[0], handles=handles, loc="lower right", bbox_to_anchor=(1.03, -0.03),
-            ncol=2, columnspacing=0.8, frameon=True, framealpha=0.9,
-            borderaxespad=0.1, borderpad=0.25, handlelength=1.4, handletextpad=0.3,
-            fontsize=plt.rcParams["legend.fontsize"])
+    fig.subplots_adjust(left=0.045, right=0.985, top=0.800, bottom=0.275,
+                        hspace=0.72, wspace=0.11)
+    # Both axis titles are placed with `fig.text` at coordinates derived from
+    # the panels' OWN measured positions rather than with `supxlabel`/
+    # `suptitle`, whose `y` was not honoured here and put the label inside the
+    # panels. Note these coordinates are computed ONCE: they are only correct
+    # while the axes stay where `subplots_adjust` put them, which is why
+    # `figure.constrained_layout.use` must stay False (see its note in `RC`).
+    top = max(a.get_position().y1 for a in axes)
+    bot = min(a.get_position().y0 for a in axes)
+    fig.text(0.5, top + 0.135, "Wall Time [seconds]", ha="center", va="center",
+             fontsize=plt.rcParams["axes.labelsize"], fontweight="bold")
+    fig.text(0.5, bot - 0.150, "Wall Time [Ratio]", ha="center", va="center",
+             fontsize=plt.rcParams["axes.labelsize"], fontweight="bold")
+
+    # "[s]" on the two seconds series and nothing on the ratio: the legend
+    # is where a reader learns which of the two axes a colour belongs to,
+    # and the bracketed unit says it without a sentence.
+    # Legend markers stay in the SERIES colours even though every median is
+    # drawn black: the colour belongs to the cloud, which is what identifies
+    # a series and which axis it is read against. Boot is a circle, not the
+    # square it is in Figure A -- the square is reserved here for the ratio,
+    # the one series read against the other axis.
+    handles = [
+        Line2D([], [], color=METHOD["qij"]["color"], ls="none", marker="o", label="QIJ [s]"),
+        Line2D([], [], color=METHOD["boot"]["color"], ls="none", marker="o", label="Boot [s]"),
+        Line2D([], [], color=OI["green"], ls="none", marker="s", label="Ratio QIJ/Boot"),
+    ]
+    fig.legend(handles=handles, loc="lower center", ncol=3, frameon=False,
+               bbox_to_anchor=(0.5, -0.008), columnspacing=1.6, handlelength=1.0,
+               handletextpad=0.35, fontsize=plt.rcParams["legend.fontsize"])
     return fig

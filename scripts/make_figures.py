@@ -5,20 +5,18 @@ no estimator is re-run, no dataset is redrawn.
 
     python scripts/make_figures.py <run_dir> [options]
 
-`<run_dir>` (a main or smoke run) supplies Figure A, Figure B and Figure C
-directly -- Figure C's 19 September redesign measures both methods
-against the truth in evaluation-cost units, so it no longer needs a
-separate timing run (the reason `--timing-dir` below is Figure D's flag
-alone). Figure D needs the cost-vs-N study's per-N products
-(`--cost-vs-n`), and, optionally, an IMF cost-vs-N sweep
-(`--cost-vs-n-imf`) for its accuracy panel's IMF M* line -- `_cost_dirs`
-finds the `N<size>` directories under each by globbing for
-`truth.parquet`, the same layout `study.py`'s multi-N runs write, one
-(dataset, estimator) pair per root. Figure D's 19 September redesign also
-needs the timing run (`--timing-dir`, 20 single-worker single-thread
-draws, `<root>/<dataset>/<estimator>/`) for its new "when QIJ pays" panel
--- the one panel in this whole CLI that reads wall time as its subject
-rather than as a byproduct, so it is the one panel that needs this flag.
+`<run_dir>` (a main or smoke run) supplies ALL FOUR figures and is the only
+input any of them has. Figure C's 19 September redesign measures both
+methods against the truth in evaluation-cost units rather than against
+wall time, and Figure D's 20 September redesign reads the per-draw wall
+times already in the main products, so neither a separate timing run nor a
+cost-against-N sweep is needed any more.
+
+`--cost-vs-n`, `--cost-vs-n-imf` and `--timing-dir` are therefore unused
+by every figure. The runbook's `figures` stage no longer passes them; they
+remain on the parser only so an older invocation typed from memory does
+not error on an unknown flag. `_cost_dirs` is likewise unused and kept for
+the same reason.
 
 `--out-dir` overrides where the `figures/` directory is written (default:
 alongside each source run, matching the old CLI's behaviour). This exists
@@ -94,14 +92,17 @@ def main() -> None:
     fig_c = figures.fig_c(args.run_dir)
     _save(fig_c, args.out_dir or args.run_dir, "fig_c")
 
-    if args.cost_vs_n:
-        if not args.timing_dir:
-            parser.error("--timing-dir is required together with --cost-vs-n: Figure D's "
-                         "'when QIJ pays' panel reads it and nothing else in this figure does")
-        cost_dirs = _cost_dirs(args.cost_vs_n)
-        imf_cost_dirs = _cost_dirs(args.cost_vs_n_imf) if args.cost_vs_n_imf else None
-        fig_d = figures.fig_d(cost_dirs, args.timing_dir, imf_run_dirs=imf_cost_dirs)
-        _save(fig_d, args.out_dir or args.cost_vs_n, "fig_d")
+    # Figure D (redesigned 20 September 2026) reads the MAIN run and nothing
+    # else -- no cost-against-N sweep, no separate timing run. Both per-draw
+    # wall times are already in the main products, measured with a draw's QIJ
+    # and its bootstrap back to back in one process, so it renders alongside
+    # A, B and C rather than behind its own flags. `--cost-vs-n`,
+    # `--cost-vs-n-imf` and `--timing-dir` are now unused by any figure; the
+    # runbook's `figures` stage no longer passes them, and they are left on
+    # the parser only so an older invocation typed from memory or a shell
+    # history does not error on an unknown flag.
+    fig_d = figures.fig_d(args.run_dir)
+    _save(fig_d, args.out_dir or args.run_dir, "fig_d")
 
 
 if __name__ == "__main__":

@@ -13,9 +13,9 @@ Supersedes `QIJ_figure_spec_rev51.md`. Every figure shows the same six coordinat
 | (2,2) | IMF α | log stellar mass |
 | (2,3) | IMF p | log stellar mass |
 
-Pareto (both), FP b and c, IMF M*, γ shape and γ scale appear in the table only.
+Pareto (both), FP b and c and IMF σ_m appear in the table only. **20 September 2026: the IMF estimator is the Chabrier form (m_c, σ_m, x); the two-regime fit (α, M*, p, γ shape, γ scale) is archived and appears nowhere in the paper.**
 
-**Label conventions (author, 19 September 2026):** the bootstrap is "Boot" in every figure legend and axis label (the paper defines the abbreviation in §3); both tail probabilities are $S_{99}$, the survival function at the population's 0.99 quantile; the Fundamental Plane scatter is $s$ (not σ, which is the velocity dispersion); the IMF slope is α and its sharpness p. Table T1 uses the same symbols in its row names. Labels per `QIJ_glossary.md`; style per `QIJ_figure_style.md`.
+**Label conventions (author, 19 September 2026):** the bootstrap is "Boot" in every figure legend and axis label (the paper defines the abbreviation in §3); both tail probabilities are $S_{99}$, the survival function at the population's 0.99 quantile; the Fundamental Plane scatter is $s$ (not σ, which is the velocity dispersion); the IMF's outputs are m_c, σ_m (the lognormal width in dex; the subscript keeps it apart from the FP's velocity dispersion σ) and x. Table T1 uses the same symbols in its row names. Labels per `QIJ_glossary.md`; style per `QIJ_figure_style.md`.
 
 **Row labels are symbols, not words** (19 September): `MVT ν`, `MVT S_99`, `FP a`, `FP s`, `IMF α`, `IMF p`.
 
@@ -23,7 +23,7 @@ S_99 is the SURVIVAL function at the 99th percentile — the probability of exce
 
 **One size, one build.** Every figure is built at the size it is placed at — LNCS text width 4.80in — so `\includegraphics` takes it 1:1 and its type matches the body text. There is no second "draft" rendering: a larger figure scaled down by LaTeX puts its labels at a fraction of their intended size, differently for every figure. Each figure writes a `.pdf` (for the paper) and a `.png` at 300 dpi (for reading and for circulating), the same figure at the same size.
 
-**Fonts** come from one dict, `RC_LNCS` in `figures.py`: titles 9pt (both `axes.titlesize` and `figure.titlesize`), axis labels 8.5, ticks and legend 7.5. They are fixed point sizes, which is only correct because of the 1:1 rule above.
+**Fonts** come from one dict, `RC` in `figures.py`: titles 9pt (both `axes.titlesize` and `figure.titlesize`), axis labels 8.5, ticks and legend 7.5. They are fixed point sizes, which is only correct because of the 1:1 rule above.
 
 **Quantitative ranges are derived from the data** (`_data_span`), never written into the code: from the extremes actually drawn, widened only far enough to keep a reference line or tolerance band in view. A hardcoded range goes stale the moment the numbers change.
 
@@ -64,7 +64,7 @@ All thirteen coordinates, rows in dataset order, columns: V_btw/V_tot, V̂_tot/V
 ## Figure D — cost (replaces F10 entirely; redesigned by the author, 19 September 2026)
 
 1 × 3 panels at full width, one measure per panel, the Figure A legend, no printed numbers inside the panels.
-- (a) **When QIJ pays.** x = time per estimator evaluation (log), y = wall time per run (log). The bootstrap's line, 2000 × the evaluation time; QIJ's line, its overhead plus its evaluations × the evaluation time (the overhead measured from the timing run: about 0.25 s for a one-output estimator at 188 prototypes, about 1.3 s for the Fundamental Plane at 371 prototypes and four outputs); the four datasets as labelled points for both methods, from the timing run (20 timed draws, one per task, single thread; medians); the crossover marked. Pareto and ν near the crossover, FP below it, the IMF a factor of three above.
+- (a) **When QIJ pays** (corrected 19 September on the coordinator's finding). x = time per FULL-DATA evaluation (log), t = the bootstrap's wall time / 2000; y = wall time per run (log). The bootstrap's line, 2000 t. QIJ's line, overhead + normalized_rows × t: QIJ is charged at its normalized rows (full-data-row equivalents, cost layer 1), NOT at its evaluation count, because its prototype-stage evaluations run on M_𝒳 rows; charging them at the full-data rate made the IMF's fitted overhead negative. Two overhead lines, one-output (0.21–0.37 s at 188 prototypes) and the Fundamental Plane (1.3 s at 371 prototypes, four outputs); the six timed estimators as labelled points for both methods (timing run: 20 draws, one per task, single thread, medians); the crossover t* = overhead/(2000 − rows) marked per line (≈ 0.13 ms one-output, ≈ 0.76 ms FP). Measured bootstrap/QIJ wall-time ratios: Pareto 0.87 and MVT S₉₉ 0.92 near the crossover, FP 0.30 below it, MVT ν 2.7 and the IMF 2.8 above it. The caption states the single-rate assumption (every row costs the same whichever evaluation it belongs to) and that the IMF's optimizer breaks it: its prototype-stage evaluations cost more per row, so its fitted 30 s "overhead" is mostly that, not the influence model; the panel illustrates the crossover, it does not measure it.
 - (b) **Cost against N.** Fundamental Plane wall time per run against N, log-log, one line per method, from the cost sweep (N = 1000, 3000, 10 000, 30 000, 76 997). Normalized rows against N are stated in the text, not plotted.
 - (c) **Accuracy against N.** Coverage at 0.95 against N for both methods: the Fundamental Plane as the mean over its four outputs with a band spanning the four; if the IMF cost sweep is on the final build, IMF M* as its own line (the finite-sample effect vanishing with N). Nominal line and Monte-Carlo band as in Figure A.
 Dropped from the old design: the width ratio against N and the bound-hit fractions against N (one sentence each in the text).
