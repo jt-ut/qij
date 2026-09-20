@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from . import estimators as _est
 from .core import intervals
 from .core.influence_model import InfluenceModel
 from .core.refine import CoordinateResult
@@ -73,8 +74,11 @@ class QIJResult:
     def interval(self, level: float) -> np.ndarray:
         """(q, 2) lower, upper; a pure function of θ̂, V̂_tot and â_BCa
         (interface sheet §4 `core/intervals.py`), computed fresh at any
-        level."""
-        return intervals.qij_interval(self.theta_hat, self.variance, self._a_bca, level)
+        level, clipped to each output's natural parameter support
+        (`estimators.supports_for`, keyed by `self.outputs`)."""
+        support = _est.supports_for(self.outputs)
+        return intervals.qij_interval(self.theta_hat, self.variance, self._a_bca,
+                                       level, support=support)
 
     def summary(self) -> pd.DataFrame:
         """One row per output: `output, V_btw, V_win_hat, V_tot_hat, B_hat,

@@ -52,18 +52,32 @@ from scipy.stats import f as f_dist
 EPS = float(np.finfo(np.float64).eps)
 
 
-def estimator(outputs, eta, name=None):
-    """Attach `name`, `outputs`, `eta` to a closed-form estimator function.
+def estimator(outputs, eta, name=None, supports=None):
+    """Attach `name`, `outputs`, `eta`, `supports` to a closed-form
+    estimator function.
 
     `name` defaults to the function's own name; the product vocabulary
     (plan Sec 3 / interface sheet Amendment 2) requires it be given
     explicitly wherever the Python identifier and the product name differ
     (`pareto_tail`/`mvt_tail` -> 'tail', `weighted_mean` -> 'mean').
+
+    `supports`, parallel to `outputs`: one `(lo, hi)` pair per output,
+    the parameter's natural support (e.g. `(0, np.inf)` for a scale,
+    `(0, 1)` for a tail probability), consumed downstream by
+    `core.intervals.qij_interval`'s `support` argument to clip the QIJ
+    interval. `supports=None` (the default) declares every output
+    unbounded, `(-inf, inf)` -- correct for `weighted_mean`'s plain
+    `theta` and for a power-law exponent, whose sign is not a support
+    constraint.
     """
     def decorate(fn):
         fn.name = name if name is not None else fn.__name__
         fn.outputs = tuple(outputs)
         fn.eta = float(eta)
+        if supports is None:
+            fn.supports = tuple((-np.inf, np.inf) for _ in fn.outputs)
+        else:
+            fn.supports = tuple((float(lo), float(hi)) for lo, hi in supports)
         return fn
     return decorate
 
@@ -147,7 +161,7 @@ PARETO_ALPHA_TRUE = 2.0
 PARETO_TAIL_C = PARETO_X_MIN * 0.01 ** (-1.0 / PARETO_ALPHA_TRUE)
 
 
-@estimator(outputs=('alpha',), eta=EPS, name='shape')
+@estimator(outputs=('alpha',), eta=EPS, name='shape', supports=[(0.0, np.inf)])
 def pareto_shape(X: np.ndarray, w: np.ndarray) -> np.ndarray:
     """Hill estimator: alpha = sum(w) / sum(w log(X / x_min))."""
     try:
@@ -175,7 +189,7 @@ def _pareto_shape_influence(X: np.ndarray, w: np.ndarray) -> np.ndarray:
 pareto_shape.influence = _pareto_shape_influence
 
 
-@estimator(outputs=('P_tail',), eta=EPS, name='tail')
+@estimator(outputs=('P_tail',), eta=EPS, name='tail', supports=[(0.0, 1.0)])
 def pareto_tail(X: np.ndarray, w: np.ndarray) -> np.ndarray:
     """T = sum(w 1{X > c}) / sum(w), c fixed at the true 99th percentile."""
     try:
@@ -229,7 +243,7 @@ def _mvt_score_weighted(r_sq: np.ndarray, nu: float, w: np.ndarray, d: int) -> f
     return g + float(np.dot(w, h)) / float(w.sum())
 
 
-@estimator(outputs=('nu',), eta=1e-12, name='nu')
+@estimator(outputs=('nu',), eta=1e-12, name='nu', supports=[(0.0, np.inf)])
 def mvt_nu(X: np.ndarray, w: np.ndarray) -> np.ndarray:
     """One-dimensional root-find of the weighted profile score in log(nu).
 
@@ -300,7 +314,7 @@ def _mvt_nu_influence(X: np.ndarray, w: np.ndarray) -> np.ndarray:
 mvt_nu.influence = _mvt_nu_influence
 
 
-@estimator(outputs=('P_tail',), eta=EPS, name='tail')
+@estimator(outputs=('P_tail',), eta=EPS, name='tail', supports=[(0.0, 1.0)])
 def mvt_tail(X: np.ndarray, w: np.ndarray) -> np.ndarray:
     """T = sum(w 1{||x|| > c}) / sum(w), c fixed at the true 99th percentile."""
     try:
@@ -366,7 +380,8 @@ def _fp_tls_fit(X_std: np.ndarray, w: np.ndarray) -> dict:
                 eigvecs=eigvecs, v3=v3, d=d, lambda3=float(eigvals[2]))
 
 
-@estimator(outputs=('a', 'b', 'c', 'scatter'), eta=1e-12, name='fp')
+@estimator(outputs=('a', 'b', 'c', 'scatter'), eta=1e-12, name='fp',
+           supports=[(-np.inf, np.inf), (-np.inf, np.inf), (-np.inf, np.inf), (0.0, np.inf)])
 def fp(X: np.ndarray, w: np.ndarray) -> np.ndarray:
     try:
         X_std = _fp_standardize(X)
@@ -619,6 +634,12 @@ class IMF:
 
     name = 'imf'
     outputs = ('slope', 'Mstar', 'p', 'gamma_shape', 'gamma_scale')
+    # Parallel to `outputs` (module-level `estimator` decorator's own
+    # convention): `slope` unbounded both sides, deliberately -- a
+    # power-law exponent's sign is not a support constraint -- the other
+    # four all (0, inf).
+    supports = ((-np.inf, np.inf), (0.0, np.inf), (0.0, np.inf),
+                (0.0, np.inf), (0.0, np.inf))
     eta = 1e-6   # sqrt of the objective (NLL) tolerance
 
     _SHAPE_BOUNDS = (1.1, 50.0)
@@ -1026,3 +1047,427 @@ def _imf_score_hessian(masses: np.ndarray, w: np.ndarray, tau: float,
     H = (J.T @ H_lam @ J + g_lam[0] * K[0] + g_lam[1] * K[1]
          + hi_hess(masses[~low], w[~low]))
     return psi, -H / float(w.sum()), J
+
+
+# ======================================================================
+# Chabrier IMF: lognormal below a FIXED break m_b, C0-joined to a power
+# law above it (Chabrier 2003) -- a candidate replacement for `IMF`
+# above. NOT wired into `study._DATASET_ESTIMATORS` and NOT added to
+# `SUPPORT_BY_OUTPUT` below: registerable, not registered.
+# ======================================================================
+
+CHABRIER_M_B_DEFAULT = 1.0
+
+
+def _chabrier_norm(a: float, sigma: float, slope: float, m_b: float,
+                    m_min: float) -> tuple:
+    """Z(theta) and its first/second partials in (a=log10(m_c), sigma,
+    slope), for the Chabrier density normalized on [m_min, m_b] union
+    (m_b, inf).
+
+    Unnormalized pieces:
+        g_lo(m) = (1/m) exp(-(log10 m - a)^2 / (2 sigma^2)),  m_min<=m<=m_b
+        g_hi(m) = m^(-(slope+1)),                               m > m_b
+
+    Low-mass integral, substituting u = log10(m) (du = dm/(m ln10), so
+    (1/m) dm = ln10 du -- this is the one substitution that makes the
+    whole low-mass piece an erf, never a quadrature):
+        I_lo = int_{m_min}^{m_b} g_lo dm
+             = ln10 * sigma * sqrt(2pi) * [Phi(z_b) - Phi(z_min)],
+        z_b = (u_b - a)/sigma,  z_min = (u_min - a)/sigma,  u_b = log10(m_b).
+
+    High-mass integral, an elementary power law:
+        I_hi = int_{m_b}^inf m^(-(slope+1)) dm = m_b^(-slope) / slope,
+    finite iff slope > 0 -- the one place this model needs slope bounded
+    away from 0 for the normalization to exist at all, unlike the
+    Schechter piece in `IMF` (whose exponential cutoff makes ITS tail
+    integral converge for any alpha).
+
+    C0 continuity at m_b is the ONLY join condition here (`IMF`'s
+    `_imf_continuity` solves a C0+C1 PAIR for the gamma's two unknowns;
+    there is nothing to solve for below m_b in this model, since the
+    lognormal IS the reported low-mass family, not an auxiliary one
+    recovered from continuity). C0 alone fixes the two pieces' relative
+    scale:
+        c_rel = g_lo(m_b) / g_hi(m_b)
+              = m_b^slope * exp(-(u_b-a)^2 / (2 sigma^2)),
+    and the overall normalizer is Z = I_lo + c_rel * I_hi. The m_b^slope
+    and m_b^(-slope) factors cancel exactly against I_hi's own m_b^
+    (-slope), leaving
+        Z = I_lo + exp(-btilde^2 / (2 sigma^2)) / slope,   btilde = a - u_b,
+    with no residual m_b dependence in the second term at all.
+
+    Returns (Z, Za, Zs, Zx, Zaa, Zas, Zax, Zss, Zsx, Zxx), all scalars
+    evaluated at (a, sigma, slope). O(1) work, called once per fit
+    (plus once per line-search/Newton step during the optimizer's own
+    iterations) -- never inside a loop over observations.
+    """
+    ln10 = log(10.0)
+    u_b = log(m_b) / ln10
+    u_min = log(m_min) / ln10
+    btilde = a - u_b
+    am = a - u_min
+
+    z_b = -btilde / sigma
+    z_m = -am / sigma
+    phi_b = exp(-0.5 * z_b * z_b) / _SQRT2PI
+    phi_m = exp(-0.5 * z_m * z_m) / _SQRT2PI
+    Phi_b = float(special.ndtr(z_b))
+    Phi_m = float(special.ndtr(z_m))
+    D = Phi_b - Phi_m
+    E = btilde * phi_b - am * phi_m
+
+    I_lo = ln10 * _SQRT2PI * sigma * D
+    Ia = ln10 * _SQRT2PI * (phi_m - phi_b)
+    Is = ln10 * _SQRT2PI * (D + E / sigma)
+    Iaa = ln10 * _SQRT2PI * (z_m * phi_m - z_b * phi_b) / sigma
+    Ias = ln10 * _SQRT2PI * (z_b * phi_b * btilde - z_m * phi_m * am) / sigma ** 2
+    Iss = ln10 * _SQRT2PI * (-btilde ** 2 * z_b * phi_b + am ** 2 * z_m * phi_m) / sigma ** 3
+
+    rho = 0.5 * btilde * btilde / (sigma * sigma)
+    c2 = exp(-rho)
+    T2 = c2 / slope
+    T2a = -c2 * btilde / (sigma ** 2 * slope)
+    T2s = c2 * btilde ** 2 / (sigma ** 3 * slope)
+    T2x = -c2 / slope ** 2
+    T2aa = c2 * (btilde ** 2 - sigma ** 2) / (sigma ** 4 * slope)
+    T2as = c2 * btilde * (2.0 * sigma ** 2 - btilde ** 2) / (sigma ** 5 * slope)
+    T2ss = c2 * btilde ** 2 * (btilde ** 2 - 3.0 * sigma ** 2) / (sigma ** 6 * slope)
+    T2ax = c2 * btilde / (sigma ** 2 * slope ** 2)
+    T2sx = -c2 * btilde ** 2 / (sigma ** 3 * slope ** 2)
+    T2xx = 2.0 * c2 / slope ** 3
+
+    Z = I_lo + T2
+    Za, Zs, Zx = Ia + T2a, Is + T2s, T2x
+    Zaa, Zas, Zax = Iaa + T2aa, Ias + T2as, T2ax
+    Zss, Zsx, Zxx = Iss + T2ss, T2sx, T2xx
+    return Z, Za, Zs, Zx, Zaa, Zas, Zax, Zss, Zsx, Zxx
+
+
+def _chabrier_score_hessian(masses: np.ndarray, w: np.ndarray, m_b: float,
+                             m_min: float, m_c: float, sigma: float,
+                             slope: float) -> tuple:
+    """(psi (N, 3), A (3, 3), Z) for the Chabrier estimator at its fitted
+    (m_c, sigma, slope), in that reporting basis.
+
+    The internal working coordinate for the peak is a = log10(m_c) (the
+    density's own natural variable, `_chabrier_norm`'s argument): every
+    score and Hessian entry is built in (a, sigma, slope) first, then
+    mapped to (m_c, sigma, slope) by the ordinary chain rule for a
+    ONE-coordinate reparameterization a = a(m_c):
+        grad_theta' F  = J^T grad_theta F
+        Hess_theta' F  = J^T Hess_theta F J + (dF/da) * Hess_theta'[a(m_c)]
+    with J = diag(da/dm_c, 1, 1) diagonal (m_c is the only coordinate
+    that reparameterizes: sigma and slope map to themselves), so
+    J^T Hess J is the elementwise D-A-D form, and Hess_theta'[a(m_c)] is
+    zero except its own (m_c, m_c) entry, d^2a/dm_c^2 = -1/(m_c^2 ln10).
+    The correction term dF/da * d^2a/dm_c^2 is carried EXACTLY here, not
+    dropped as "zero at the fit" (it IS exactly zero once F is the mean
+    log density and theta is at the fit -- the mean score is the
+    first-order condition -- but this routine also supplies the
+    optimizer's own Hessian away from convergence, where that is not
+    yet true, and dropping it there would silently understate curvature
+    during the search, not just at its end).
+
+    The log density, before the -log Z term (common to both regimes,
+    `_chabrier_norm`):
+        m <= m_b:  ell = -log(m) - (log10 m - a)^2 / (2 sigma^2)
+        m >  m_b:  ell = slope*log(m_b) - btilde^2/(2 sigma^2)
+                          - (slope+1)*log(m),      btilde = a - log10(m_b)
+    `psi` is grad_theta[ell - log Z] per observation, in the reported
+    (m_c, sigma, slope) basis; `A` is the negative Hessian of the
+    weighted MEAN log density, -(1/W) Hess[sum w_i ell_i] -- the same
+    M-estimator construction as `_imf_score_hessian`. The m<=m_b block's
+    Hessian needs only three weighted sums of the low-mass log10 masses
+    (count, and first/second moment about a); the m>m_b block's raw
+    Hessian needs only the total high-mass weight -- unlike `IMF`'s
+    Schechter block, NEITHER needs a per-observation sum involving
+    log(m) for the Hessian (only for the score), because the high-mass
+    log density here is exactly LINEAR in log(m): no exponential cutoff,
+    so no second derivative in log(m) at all. O(N) in one vectorized
+    pass over the masses plus O(1) work.
+    """
+    masses = np.asarray(masses, dtype=float).reshape(-1)
+    w = np.asarray(w, dtype=float)
+    ln10 = log(10.0)
+    a = log(m_c) / ln10
+    u_b = log(m_b) / ln10
+    btilde = a - u_b
+    W = float(w.sum())
+
+    Z, Za, Zs, Zx, Zaa, Zas, Zax, Zss, Zsx, Zxx = _chabrier_norm(
+        a, sigma, slope, m_b, m_min)
+
+    low = masses <= m_b
+    u = np.log(masses) / ln10
+
+    psi = np.empty((masses.size, 3))
+    psi[low, 0] = (u[low] - a) / sigma ** 2 - Za / Z
+    psi[low, 1] = (u[low] - a) ** 2 / sigma ** 3 - Zs / Z
+    psi[low, 2] = -Zx / Z
+    psi[~low, 0] = -btilde / sigma ** 2 - Za / Z
+    psi[~low, 1] = btilde ** 2 / sigma ** 3 - Zs / Z
+    psi[~low, 2] = (log(m_b) - np.log(masses[~low])) - Zx / Z
+
+    w_lo, w_hi = w[low], w[~low]
+    Shi0 = float(w_hi.sum())   # Slo0 + Shi0 == W identically (every point is lo or hi)
+    d_lo = u[low] - a
+    Slo1 = float(np.dot(w_lo, d_lo))
+    Slo2 = float(np.dot(w_lo, d_lo ** 2))
+
+    Haa_lnZ = Zaa / Z - Za * Za / Z ** 2
+    Has_lnZ = Zas / Z - Za * Zs / Z ** 2
+    Hax_lnZ = Zax / Z - Za * Zx / Z ** 2
+    Hss_lnZ = Zss / Z - Zs * Zs / Z ** 2
+    Hsx_lnZ = Zsx / Z - Zs * Zx / Z ** 2
+    Hxx_lnZ = Zxx / Z - Zx * Zx / Z ** 2
+
+    A_aa = 1.0 / sigma ** 2 + Haa_lnZ
+    A_as = 2.0 * (Slo1 - Shi0 * btilde) / (W * sigma ** 3) + Has_lnZ
+    A_ax = Hax_lnZ
+    A_ss = 3.0 * (Slo2 + Shi0 * btilde ** 2) / (W * sigma ** 4) + Hss_lnZ
+    A_sx = Hsx_lnZ
+    A_xx = Hxx_lnZ
+
+    J1 = 1.0 / (m_c * ln10)
+    f_a = float(np.dot(w, psi[:, 0])) / W
+
+    A = np.array([
+        [J1 ** 2 * A_aa + f_a * J1 / m_c, J1 * A_as, J1 * A_ax],
+        [J1 * A_as, A_ss, A_sx],
+        [J1 * A_ax, A_sx, A_xx],
+    ])
+    psi_final = np.column_stack([psi[:, 0] * J1, psi[:, 1], psi[:, 2]])
+    return psi_final, A, Z
+
+
+class Chabrier:
+    """Chabrier (2003)-form IMF estimator: lognormal below a FIXED break
+    m_b, C0-joined to a power law above it. A candidate replacement for
+    `IMF` above -- NOT registered in `study._DATASET_ESTIMATORS`; built
+    and measured, not wired into any default run.
+
+    Free parameters (m_c, sigma, x): the lognormal's peak mass and
+    log10-width below m_b, and the power law's slope above it (density
+    m^-(x+1) -- Salpeter is x=1.35). `m_b` is fixed at construction
+    (never fitted), exactly as `tau` is fixed for `IMF`; it defaults to
+    Chabrier's own break, 1.0 Msun (`CHABRIER_M_B_DEFAULT`). `m_min` is
+    ALSO fixed at construction: the density is normalized on
+    [m_min, m_b] union (m_b, inf), and m_min must be the SAME fixed
+    constant across every draw of a dataset (never a draw's own
+    empirical minimum, which would make the model's normalization
+    depend on which points happened to be resampled) -- the caller
+    passes the shipped pool's minimum mass, exactly the role
+    `datasets.IMF_TAU` plays for `IMF` (see `datasets.CHABRIER_M_MIN`).
+
+    The join is C0 only (`_chabrier_norm`'s docstring): matching VALUE at
+    m_b fixes the two pieces' relative scale in closed form. There is no
+    second (C1) condition and no root-find anywhere in this estimator,
+    because unlike `IMF`'s gamma/Schechter pair, the low-mass family
+    here IS the reported family, not an auxiliary one recovered from a
+    continuity system. Both piece integrals are elementary (erf/Phi for
+    the lognormal, a power law for the tail power-law); no quadrature.
+
+    `Chabrier.supports` declares **x > 0**, which is NOT parallel to
+    `IMF.supports`'s unbounded treatment of `slope`. IMF's Schechter tail
+    carries an exponential cutoff, so alpha's sign never threatens
+    normalizability and its bounds are a search range only. Here the
+    high-mass piece is a bare power law: int_{m_b}^inf m^-(x+1) dm
+    converges only for x > 0, so x <= 0 does not describe a density at
+    all. That makes x's positivity a support constraint of the same kind
+    as m_c > 0 and sigma > 0, and it is declared as one. `self.bounds`
+    (the optimizer's own box, the same two-tier convention `IMF` uses)
+    separately keeps the search off the boundary with margin.
+    """
+
+    name = 'chabrier'
+    outputs = ('m_c', 'sigma', 'x')
+    # Parallel to `outputs`: all three are genuine support constraints --
+    # m_c and sigma are positive scales, and x > 0 is required for the
+    # bare power-law tail to integrate (see class docstring).
+    supports = ((0.0, np.inf), (0.0, np.inf), (0.0, np.inf))
+    eta = 1e-6   # sqrt of the objective (NLL) tolerance, mirrors IMF.eta
+
+    def __init__(self, m_min: float, m_b: float = CHABRIER_M_B_DEFAULT,
+                 bounds=((0.01, 5.0), (0.02, 5.0), (0.05, 10.0))):
+        self.m_b = float(m_b)
+        self.m_min = float(m_min)
+        self.bounds = tuple((float(lo), float(hi)) for lo, hi in bounds)
+
+    def _at_box(self, params: np.ndarray) -> bool:
+        """The box rule (module-level `_at_bound`, applied the same way
+        every bounded estimator in this file applies it): true when any
+        of (m_c, sigma, x) -- the THREE coordinates `self.bounds` itself
+        constrains, and the search itself walks in, directly, with no
+        log-reparameterization of the box -- lies within `_BOX_TOL` of
+        its own interval's width of either end."""
+        return any(_at_bound(v, lo, hi) for v, (lo, hi) in zip(params, self.bounds))
+
+    def _moment_start(self, u_lo: np.ndarray, w_lo: np.ndarray,
+                       m_hi: np.ndarray, w_hi: np.ndarray) -> np.ndarray:
+        """Method-of-moments start, computed once from (X, w): (m_c0,
+        sigma0) from the weighted mean and std of log10(mass) below
+        m_b -- the lognormal's own sufficient statistics, no fitting
+        needed for a start; slope0 from the weighted HILL estimator
+        above m_b, `sum(w_hi) / sum(w_hi log(m_hi/m_b))`. Unlike `IMF`'s
+        `_moment_start` (interface sheet Amendment 5), this Hill
+        estimator needs NO inversion: the high-mass density here is an
+        exact, uncut power law m^-(x+1) for every m > m_b, so the
+        ordinary Hill formula is already the slope's own closed-form
+        MLE, not the tail index of a different (survival-function)
+        exponent that has to be inverted back."""
+        Wlo = float(w_lo.sum())
+        a0 = float(np.dot(w_lo, u_lo) / Wlo)
+        var0 = float(np.dot(w_lo, (u_lo - a0) ** 2) / Wlo)
+        sigma0 = sqrt(max(var0, 1e-4))
+        m_c0 = 10.0 ** a0
+
+        Whi = float(w_hi.sum())
+        log_ratio = np.log(m_hi / self.m_b)
+        denom = float(np.dot(w_hi, log_ratio))
+        slope0 = Whi / denom if denom > 0 else 1.35
+
+        return np.array([m_c0, sigma0, slope0])
+
+    def __call__(self, X: np.ndarray, w: np.ndarray) -> np.ndarray:
+        try:
+            masses = np.asarray(X, dtype=float).reshape(-1)
+            w = np.asarray(w, dtype=float)
+            m_b, m_min = self.m_b, self.m_min
+            low_mask = masses <= m_b
+            n_lo = int(low_mask.sum())
+            n_hi = int((~low_mask).sum())
+            if n_lo < 3 or n_hi < 3:
+                return np.full(3, np.nan)
+
+            ln10 = log(10.0)
+            u = np.log(masses) / ln10
+            m_lo, w_lo, u_lo = masses[low_mask], w[low_mask], u[low_mask]
+            m_hi, w_hi = masses[~low_mask], w[~low_mask]
+
+            x0 = self._moment_start(u_lo, w_lo, m_hi, w_hi)
+            bounds_lo = np.array([b[0] for b in self.bounds])
+            bounds_hi = np.array([b[1] for b in self.bounds])
+            x0 = np.clip(x0, bounds_lo, bounds_hi)
+            box_centre = 0.5 * (bounds_lo + bounds_hi)
+
+            # The objective and its exact gradient/Hessian, both from
+            # `_chabrier_score_hessian` -- see `IMF.__call__`'s own
+            # comment on why the gradient must be supplied exactly
+            # (a numerically-differenced objective would carry noise
+            # from nothing here, since there is no inner solve, but
+            # supplying it is still cheaper and more accurate than
+            # finite-differencing three parameters).
+            def nll(params):
+                m_c, sigma, slope = params
+                if m_c <= 0 or sigma <= 0 or slope <= 0:
+                    return _NLL_PENALTY, np.asarray(params, dtype=float) - box_centre
+                try:
+                    psi, A, Z = _chabrier_score_hessian(
+                        masses, w, m_b, m_min, m_c, sigma, slope)
+                except Exception:
+                    return _NLL_PENALTY, np.asarray(params, dtype=float) - box_centre
+                if not (np.isfinite(Z) and Z > 0):
+                    return _NLL_PENALTY, np.asarray(params, dtype=float) - box_centre
+                a = log(m_c) / ln10
+                btilde = a - log(m_b) / ln10
+                logZ = log(Z)
+                ell = np.empty(masses.size)
+                ell[low_mask] = -np.log(m_lo) - (u_lo - a) ** 2 / (2.0 * sigma ** 2)
+                ell[~low_mask] = (slope * log(m_b) - btilde ** 2 / (2.0 * sigma ** 2)
+                                   - (slope + 1.0) * np.log(m_hi))
+                value = -float(np.dot(w, ell - logZ))
+                grad = -(w[:, None] * psi).sum(axis=0)
+                if not np.isfinite(value) or not np.all(np.isfinite(grad)):
+                    return _NLL_PENALTY, np.asarray(params, dtype=float) - box_centre
+                return value, grad
+
+            def hess(params):
+                m_c, sigma, slope = params
+                if m_c <= 0 or sigma <= 0 or slope <= 0:
+                    return np.eye(3)
+                try:
+                    _, A, Z = _chabrier_score_hessian(
+                        masses, w, m_b, m_min, m_c, sigma, slope)
+                except Exception:
+                    return np.eye(3)
+                if not (np.isfinite(Z) and Z > 0):
+                    return np.eye(3)
+                H = float(np.sum(w)) * A
+                return H if np.all(np.isfinite(H)) else np.eye(3)
+
+            res = optimize.minimize(
+                nll, x0, method='trust-constr', jac=True, hess=hess,
+                bounds=optimize.Bounds(bounds_lo, bounds_hi),
+                options={'maxiter': 400, 'gtol': 1e-8, 'xtol': self.eta ** 2},
+            )
+            if not res.success:
+                return np.full(3, np.nan)
+            if self._at_box(res.x):
+                return np.full(3, np.nan)
+            return np.array([float(v) for v in res.x])
+        except Exception:
+            return np.full(3, np.nan)
+
+    def influence(self, X: np.ndarray, w: np.ndarray) -> np.ndarray:
+        """The analytic influence (N, 3) at the fitted parameters:
+        `IF = A^-1 psi`, `psi` and `A` from `_chabrier_score_hessian`,
+        the same M-estimator construction as `IMF.influence` -- with no
+        delta-method step for any derived output, because none falls
+        out of this model's continuity condition the way `IMF.influence`
+        gets `gamma_shape`/`gamma_scale` from the C0+C1 solve: the C0
+        condition here only fixes a normalization constant (`c_rel`),
+        not a second family's parameters, so there is nothing beyond
+        (m_c, sigma, x) to report. NaN (N, 3) whenever the fit fails,
+        the fit is at its box (plan Sec 4 ruling: a non-stationary
+        evaluation's influence is meaningless, `IMF.influence`'s same
+        rule), or the solve against `A` fails.
+        """
+        try:
+            theta = self(X, w)
+            if not np.all(np.isfinite(theta)) or self._at_box(theta):
+                return np.full((len(X), 3), np.nan)
+            masses = np.asarray(X, dtype=float).reshape(-1)
+            m_c, sigma, slope = (float(v) for v in theta)
+            psi, A, _ = _chabrier_score_hessian(
+                masses, np.asarray(w, dtype=float), self.m_b, self.m_min,
+                m_c, sigma, slope)
+            IF = np.linalg.solve(A, psi.T).T
+            if not np.all(np.isfinite(IF)):
+                return np.full((len(X), 3), np.nan)
+            return IF
+        except Exception:
+            return np.full((len(X), 3), np.nan)
+
+
+# ======================================================================
+# Output -> support lookup (Sec 1 of the batch of four, 19 September):
+# every estimator above declares its own outputs' natural parameter
+# support (the `estimator` decorator's `supports`, or, for `IMF`, the
+# class attribute parallel to `outputs`); this table is built once, from
+# those declarations, never hand-copied a second time. No output name
+# is shared between two estimators with DIFFERENT supports (`P_tail`
+# is `pareto_tail`'s and `mvt_tail`'s alike, both (0, 1)), so one dict
+# keyed by output name alone is unambiguous across the whole package.
+# ======================================================================
+
+SUPPORT_BY_OUTPUT = {}
+for _fn in (weighted_mean, pareto_shape, pareto_tail, mvt_nu, mvt_tail, fp,
+            IMF, Chabrier):
+    for _name, _sup in zip(_fn.outputs, _fn.supports):
+        SUPPORT_BY_OUTPUT[_name] = _sup
+del _fn, _name, _sup
+
+
+def supports_for(outputs) -> np.ndarray:
+    """(q, 2) array of [lo, hi] support bounds for `outputs` (an ordered
+    list/tuple of output names), from `SUPPORT_BY_OUTPUT`. An output name
+    this package never declared a support for (should not occur -- the
+    estimators above cover every name any product writes) comes back
+    unbounded, `(-inf, inf)`, rather than raising, so a caller iterating
+    a run's own `theta_hat_<output>` columns cannot be broken by a name
+    it does not recognize."""
+    return np.array(
+        [SUPPORT_BY_OUTPUT.get(o, (-np.inf, np.inf)) for o in outputs],
+        dtype=float,
+    )

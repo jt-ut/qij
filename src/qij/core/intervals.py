@@ -13,11 +13,26 @@ from scipy.stats import norm
 
 
 def qij_interval(theta_hat: np.ndarray, variance: np.ndarray,
-                  a_bca: np.ndarray, level: float) -> np.ndarray:
+                  a_bca: np.ndarray, level: float,
+                  support: np.ndarray = None) -> np.ndarray:
     """
     The QIJ interval h^QIJ_level (glossary): the level*100% BCa-form
     interval with variance `variance` (V_tot_hat), acceleration
-    `a_bca`, z0 = 0, centred at `theta_hat`. Each argument is (q,).
+    `a_bca`, z0 = 0, centred at `theta_hat`. Each of `theta_hat`,
+    `variance`, `a_bca` is (q,).
+
+    `support`, (q, 2) of [lo, hi] per coordinate (e.g. (0, inf) for a
+    scale parameter, (0, 1) for a tail probability), clips the computed
+    `lo`/`hi` into that coordinate's natural parameter support.
+    `support=None` (the default) applies no clip. The clip can only
+    narrow the interval, never widen it, and never touches `theta_hat`
+    itself or anything upstream of `lo`/`hi`: the truth lies in its own
+    parameter's support by construction, so clipping the interval to
+    that same support removes only infeasible region the BCa adjustment
+    produced, and cannot change which draws are covered. NaN in `lo`/
+    `hi` (a failed draw) stays NaN through the clip (`np.maximum`/
+    `np.minimum` propagate NaN).
+
     Returns (q, 2), [lo, hi].
     """
     theta_hat = np.asarray(theta_hat, dtype=float)
@@ -34,6 +49,12 @@ def qij_interval(theta_hat: np.ndarray, variance: np.ndarray,
 
     lo = theta_hat + adj_lo * se
     hi = theta_hat + adj_hi * se
+
+    if support is not None:
+        support = np.asarray(support, dtype=float)
+        lo = np.maximum(lo, support[..., 0])
+        hi = np.minimum(hi, support[..., 1])
+
     return np.stack([lo, hi], axis=-1)
 
 

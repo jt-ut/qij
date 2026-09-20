@@ -338,11 +338,20 @@ def between_terms(binset: BinSet, coordinate: int):
     one estimand coordinate:
 
         V_btw = (1/N) * sum_k p_k * U[k, coordinate]^2
-        B_hat = sum_k p_k * d2T[k, coordinate] / (2N)
+        B_hat = sum_k p_k * (1 - p_k) * d2T[k, coordinate] / (2N)
 
-    B_hat is the between-bin curvature term: an estimate of part of
-    the second-order bias, not the full second-order bias. Off-
-    coordinate columns of U and d2T are never mixed in: only column
+    B_hat's p_k*(1-p_k) is the diagonal of the multinomial covariance
+    Sigma = (diag(p) - p p^T)/N (times N): the -p_k^2 term is there
+    because it does NOT drop out of the trace the way it does for
+    V_btw, where U is mass-centred (sum_k p_k U_k = 0) and the
+    off-diagonal -p_k p_l cross terms cancel identically regardless.
+    B_hat has no such cancellation, so both terms of the diagonal are
+    needed (commit correcting the omitted -p_k^2/N term, batch of four,
+    19 September). B_hat is the between-bin curvature term: an estimate
+    of part of the second-order bias, not the full second-order bias,
+    and it is a reported diagnostic only -- it is not an input to
+    `core.intervals.qij_interval`, so no interval moves when it changes.
+    Off-coordinate columns of U and d2T are never mixed in: only column
     `coordinate` is used here, even though `binset` carries all q
     columns because every evaluation returns all coordinates.
 
@@ -359,6 +368,6 @@ def between_terms(binset: BinSet, coordinate: int):
     d2T_c = binset.d2T[:, coordinate]
 
     V_btw = float(np.sum(p * U_c ** 2)) / N
-    B_hat = float(np.sum(p * d2T_c) / (2.0 * N))
+    B_hat = float(np.sum(p * (1.0 - p) * d2T_c) / (2.0 * N))
 
     return V_btw, B_hat

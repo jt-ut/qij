@@ -2,17 +2,20 @@
 The paper's figures (`QIJ_figure_spec_final.md`, 19 September 2026): Figure
 A (accuracy, replaces F2), Figure B (refined influence against the truth,
 replaces F3 and F9), Figure C (precision per evaluation, redesigned 19
-September, replaces F7), Figure D (cost against sample size, was F10,
-design unchanged, now with an optional IMF sweep pair). Every figure here
-is a pure function of the products `qij.study` writes under
-`<run_dir>/<dataset>/<estimator>/` -- `truth.parquet`, `qij.parquet`,
+September, replaces F7), Figure D (cost, redesigned 19 September, replaces
+F10 entirely -- three panels, "when QIJ pays" against cost against N
+against accuracy against N; the old normalized-rows/wall-time-ratio and
+bound-hit-fraction panels are gone, one sentence each in the text instead).
+Every figure here is a pure function of the products `qij.study` writes
+under `<run_dir>/<dataset>/<estimator>/` -- `truth.parquet`, `qij.parquet`,
 `boot.h5`, `qij_points.parquet`, `qij_prototypes.parquet`. Nothing else is
 read: no estimator is re-run, no dataset is redrawn, no interval is read
 (none is stored -- every interval here is recomputed from
 `core.intervals.qij_interval` or `core.intervals.percentile_interval`).
 Figure C no longer needs a separate timing run: the 19 September redesign
 measures both methods against the truth in the same evaluation-cost unit,
-not against wall time (Figure D's subject).
+not against wall time. Figure D's redesign needs one again, for its own
+panel (a) alone -- see `fig_d`'s docstring.
 QIJ's second-order interval was built, checked against plan §34's decision
 rule on the rev-7 products and rejected there (it lowered coverage on
 every coordinate at every level, plan §36.1, §36.2 ruling 6); this module
@@ -108,6 +111,7 @@ from scipy.stats import pearsonr
 from scipy.stats.mstats import mjci
 
 from qij.core.intervals import percentile_interval, qij_interval
+from qij.estimators import supports_for
 
 __all__ = ["fig_a", "fig_b", "fig_c", "fig_d"]
 
@@ -129,16 +133,6 @@ METHOD = {
     "truth": dict(color=OI["black"], ls=":", marker=None, label="Truth"),
 }
 BAND = dict(materiality="#DDDDDD")
-SECONDARY = "#444444"   # a neutral third hue for a twin-axis quantity that
-                         # is itself a ratio (wall time, width) rather than
-                         # a second method -- never confused with QIJ/boot.
-
-# 4-hue qualitative palette for the panels that must encode a per-output
-# categorical axis at once (Figure D's coverage panels): method keeps its
-# own linestyle/marker (solid o = QIJ, dashed s = bootstrap) as the second
-# cue there, same convention as the module this replaces used for F10(c).
-OUTPUT_COLORS = [OI["orange"], OI["green"], OI["purple"], OI["skyblue"],
-                  OI["yellow"], OI["black"]]
 
 RC = {
     "font.family": "DejaVu Sans",
@@ -183,10 +177,19 @@ FIGSIZE_B_LNCS = (4.80, 4.20)
 FIGSIZE_B_DRAFT = (12.0, 7.0)
 FIGSIZE_C_LNCS = (4.80, 4.20)
 FIGSIZE_C_DRAFT = (12.0, 7.0)
-FIGSIZE_D1_LNCS = (4.80, 2.20)     # 1x2: FP only
-FIGSIZE_D1_DRAFT = (11.0, 4.4)
-FIGSIZE_D2_LNCS = (4.80, 3.60)     # 2x2: FP row + IMF sweep row
-FIGSIZE_D2_DRAFT = (11.0, 8.0)
+# 1x3, full width (redesigned 19 September, replaces the old 1x2/2x2
+# pair above): a log-log panel with labelled points (a) sitting next to
+# two log-linear/log-log panels (b, c) needs more height than the style
+# guide's own 1x3 row, (4.80, 1.90) -- that number was set for F0's three
+# histograms, none of which carries axis ticks on two decades or point
+# labels that must clear their own marker. Grown the same way Figures B
+# and C were, empirically, until nothing collided (`fig_d`'s own report).
+# Grown again, 2.00 -> 2.35in, when panel (a)'s point moved from one
+# estimator per DATASET to the four actual ESTIMATOR OBJECTS: MVT S_99
+# and FP now sit within 15% of each other in t, on top of the one-output
+# crossover mark, and 2.00in of height left no room for a legend or a
+# leader line that could clear that cluster without leaving the axes.
+FIGSIZE_D_LNCS = (4.80, 2.35)
 
 # `plt.rcParams` has no real "annotation.fontsize" key -- the module this
 # replaces called `plt.rcParams.get("annotation.fontsize", 9)` for its
@@ -206,22 +209,6 @@ def _use_style() -> None:
     # figure, which is the mismatch the style guide exists to prevent.
     plt.rcParams.update(RC_LNCS)
     _STATE["annotation_fontsize"] = 7
-
-
-def _panel_label(ax, text: str, dy: float = 1.16, dx: float = -0.13) -> None:
-    """`dy` (axes-fraction) is a parameter, not a constant, because the
-    same absolute clearance above a panel's title means a very different
-    RELATIVE offset depending on how tall that panel's own axes are: a
-    2x3 grid's row is a fraction of the figure a 1x3 row is not, so a
-    `dy` generous enough to clear a wide, centred title in a narrow 2x3
-    panel (Figures B, C) would push the label off the TOP of a 1x3
-    figure (Figure A, which has no title to clear in the first place).
-    `dx` is likewise tuned per grid: a centred title's rendered width is
-    a much bigger share of a narrow panel's own width, so how far left
-    the label has to sit to clear it differs the same way."""
-    ax.text(dx, dy, text, transform=ax.transAxes,
-            fontsize=plt.rcParams["axes.titlesize"], fontweight="bold",
-            va="top", ha="left")
 
 
 def _legend(ax_or_fig, title=None, **kw):
@@ -344,18 +331,24 @@ def _load_draws(estimator_dir: str, outputs: list) -> dict:
 
 def _qij_lo_hi(loaded: dict, j: int, level: float) -> np.ndarray:
     """(n, 2) [lo, hi] for output index `j`, over every draw in `loaded`,
-    at `level`, from `core.intervals.qij_interval`. A draw whose
-    `theta_hat`/`V_tot_hat`/`a_bca` is not all finite for this output
-    (a box-rule or QIJ-side failure, plan §36.2 ruling 5) is left NaN
-    rather than passed in -- `qij_interval` would produce NaN from it
-    anyway, but the finiteness check is made explicit here rather than
-    relied on implicitly."""
+    at `level`, from `core.intervals.qij_interval`, clipped to this
+    output's natural parameter support (`estimators.supports_for`,
+    `loaded["outputs"][j]`) -- the one place in this file that support
+    clip is applied, since every figure that draws a QIJ interval calls
+    this rather than `qij_interval` directly. A draw whose `theta_hat`/
+    `V_tot_hat`/`a_bca` is not all finite for this output (a box-rule or
+    QIJ-side failure, plan §36.2 ruling 5) is left NaN rather than passed
+    in -- `qij_interval` would produce NaN from it anyway, but the
+    finiteness check is made explicit here rather than relied on
+    implicitly."""
     n = loaded["theta_hat"].shape[0]
+    support = supports_for([loaded["outputs"][j]])
     lo_hi = np.full((n, 2), np.nan)
     for i in range(n):
         th, v, a = loaded["theta_hat"][i, j], loaded["v_tot_hat"][i, j], loaded["a_bca"][i, j]
         if np.isfinite(th) and np.isfinite(v) and np.isfinite(a):
-            lo_hi[i] = qij_interval(np.array([th]), np.array([v]), np.array([a]), level)[0]
+            lo_hi[i] = qij_interval(np.array([th]), np.array([v]), np.array([a]), level,
+                                     support=support)[0]
     return lo_hi
 
 
@@ -615,26 +608,33 @@ _A_TITLE = "QIJ vs. Bootstrap: 95% CIs"
 
 
 def fig_a(run_dir: str) -> plt.Figure:
-    """Figure A -- accuracy (spec section "Figure A"). Three panels side by
+    """Figure A -- accuracy (spec section "Figure A"). TWO panels side by
     side, the six fixed coordinates as rows in each, reading down in the
     spec table's order: MVT nu, MVT P_tail, FP a, FP scatter, IMF slope,
     IMF p.
 
-    (a) log(V_hat_tot/V_MC) [QIJ] and log(V_boot/V_MC) [bootstrap], V_MC
-    the Monte-Carlo variance of theta_hat over draws (NOT the oracle
-    variance -- the 19 September spec's own change from the module this
-    replaces); mean over draws with 95% whiskers, +/-0.05 materiality band.
-    Caption note for the IMF p row (not rendered here, this is prose for
-    the tex): V_MC there is inflated by interior fits far out on the
-    ridge, so that row's coverage and width (panels b, c) are the
-    informative numbers, not panel (a).
-    (b) coverage of both intervals at 0.95, MC-SE whiskers, nominal line.
-    (c) width ratio QIJ/bootstrap at 0.95, median with 5-95% whiskers,
-    +/-10% band, unity line.
+    (a) coverage of both intervals at 0.95, MC-SE whiskers, nominal line.
+    (b) width ratio QIJ/bootstrap at 0.95, MEDIAN with 5-95% whiskers,
+    +/-10% band, unity line. Being a median it is unmoved by the natural-
+    support clip (`core.intervals.qij_interval`'s `support`), which acts
+    only on the far tail of the width distribution; Figure C's MEAN
+    interval score is where that clip shows. The two figures therefore
+    disagree about IMF p by construction, not by error: (b) reads 0.67
+    there because QIJ's interval is a third narrower than the bootstrap's
+    at the median -- while covering better, 0.957 against 0.952.
 
-    Row labels are drawn once, on panel (a), and omitted from (b)/(c) --
-    repeating six labels three times each does not fit in 2.20in of
-    height and adds nothing panel (a) did not already say.
+    The variance panel, log(V_hat_tot/V_MC) against log(V_boot/V_MC), was
+    REMOVED by the author on 19 September 2026 (figure spec, "Figure A"):
+    it compared each method to a third quantity where these two compare
+    the methods to each other on what a reader acts on, and the only
+    dramatic thing in it -- the IMF p row -- was a property of that
+    denominator rather than of either method. `_a_rows` still returns its
+    rows (one pass builds all three); T1 keeps the ratio for all thirteen
+    coordinates, written V_hat/V_hat_MC with both terms hatted.
+
+    Row labels are drawn once, on panel (a), and omitted from (b) --
+    repeating six labels twice does not fit in the panel height and adds
+    nothing panel (a) did not already say.
     """
     _use_style()
     figsize = FIGSIZE_A_LNCS
@@ -941,9 +941,14 @@ def _c_bootstrap_curve(theta_c: np.ndarray, w_true: float, theta_true: float,
     grid, the percentile width from the first b replicates of every draw,
     relative error against the SINGLE scalar `w_true` (not each draw's
     own converged width -- the 19 September redesign's point). Rows carry
-    the MEDIAN over draws and the interquartile band (spec: "the curve is
-    the median over draws ... the band the interquartile range"). Loop
-    over draws and the b grid only, never over N.
+    the MEAN over draws and the +/-1 SE band (the figure legend's own
+    label, "mean +/- SE" -- not the median/interquartile band an earlier
+    draft of the spec described and this docstring used to repeat). The
+    dict keys stay `median`/`p25`/`p75` for historical reasons (an
+    earlier median/IQR design this function no longer implements); they
+    hold the mean and mean -/+ SE respectively, and are left unrenamed
+    since renaming them would touch every plotting call that reads them
+    for no benefit. Loop over draws and the b grid only, never over N.
 
     `mask`: (S,) boolean, the comparison-set ruling's fixed common set
     (`_comparison_mask`, computed ONCE by `fig_c` from the FULL bootstrap
@@ -983,9 +988,11 @@ def _c_bootstrap_curve(theta_c: np.ndarray, w_true: float, theta_true: float,
 def _c_qij_point(loaded: dict, j: int, w_true: float, theta_true: float, level: float,
                   mask: np.ndarray = None) -> dict:
     """The QIJ marker: x the median over draws of `normalized_rows`, y the
-    median over draws of the QIJ interval's relative width error against
-    the same scalar `w_true` the bootstrap curve uses, interquartile
-    whiskers on y.
+    MEAN over draws of the QIJ interval's relative width error against
+    the same scalar `w_true` the bootstrap curve uses, with +/-1 SE
+    whiskers on y (the figure legend's own "mean +/- SE" -- not the
+    median/interquartile whiskers this docstring used to describe; only
+    x, `normalized_rows`, is still a median here).
 
     `mask`: the same fixed common set `_c_bootstrap_curve` uses
     (`_comparison_mask`, comparison-set ruling), so the marker is a
@@ -1192,300 +1199,561 @@ def fig_c(run_dir: str) -> plt.Figure:
 
 
 # ---------------------------------------------------------------------------
-# Figure D -- cost against N (was F10, design unchanged; adds the IMF
-# sweep pair when an IMF cost-vs-N run is supplied).
+# Figure D -- cost (replaces F10 entirely, redesigned by the author, 19
+# September 2026). Three unrelated inputs, one per panel: the timing run
+# (a, wall time per evaluation), the FP cost-vs-N sweep (b and the FP half
+# of c), and, optionally, the IMF cost-vs-N sweep (the IMF half of c). No
+# panel here reads `qij_points.parquet` or `qij_prototypes.parquet` --
+# unlike Figures B and C, cost is a property of the run, not of any one
+# draw's refined influence.
 # ---------------------------------------------------------------------------
 
-def _d_series_fp(run_dirs: dict, level: float) -> dict:
-    """One pass over the FP cost-vs-N sweep's N values, building every
-    series Figure D's top row needs: normalized rows, the QIJ/bootstrap
-    wall-time ratio, coverage of both intervals per output, and the width
-    ratio -- one `_load_draws` per N, not one per series."""
+_D_TIMING_B = 2000   # the bootstrap's fixed replicate count in every entry
+                      # of the timing run (`config.yaml`'s own `B: 2000`),
+                      # so "one evaluation" on the x-axis is exact, not a fit.
+
+# Panels (b) and (c) tell the Fundamental Plane and the IMF apart by
+# colour, not by method -- neither is `METHOD["qij"]`'s blue or
+# `METHOD["boot"]`'s vermillion, which are reserved for QIJ/Boot on every
+# figure in the paper, this one's own panel (a) included. Green and
+# purple from the same Okabe-Ito set (`OI`), chosen for distance from
+# both reserved colours and from each other and from the black truth/
+# reference lines every panel here also draws.
+_D_DATASET_COLOR = dict(fp=OI["green"], imf=OI["purple"])
+
+# The four points panel (a) labels -- one per ESTIMATOR OBJECT, not one per
+# dataset (author, corrected): an estimator evaluation is shared across a
+# dataset's outputs (the Fundamental Plane's four coordinates -- a, b, c,
+# scatter -- are ONE evaluation), so the unit panel (a) prices is the
+# estimator, and the four that appear are exactly the four `_COORDS` above
+# maps its six coordinates onto: mvt/nu, mvt/tail, fp/fp, imf/imf. Pareto is
+# dropped entirely -- it appears in no other figure in the paper (`_COORDS`
+# never names it), so a Figure D that still plotted it was the one place in
+# the package an estimand outside the paper's own six coordinates showed up.
+# Labels match the other figures' row labels exactly (`_COORDS`'s own
+# `label` strings): S_99, not P_tail or tail.
+_D_POINTS = [
+    dict(dataset="mvt", estimator="nu", label=r"MVT $\nu$"),
+    dict(dataset="mvt", estimator="tail", label=r"MVT $S_{99}$"),
+    dict(dataset="fp", estimator="fp", label="FP"),
+    dict(dataset="imf", estimator="imf", label="IMF"),
+]
+
+# The one-output timing entries the "one-output" QIJ line is averaged over
+# (188 prototypes each, the spec's own figure). Pareto dropped along with
+# the rest of it (above): the two MVT entries are both one-output estimators
+# and both are now plotted points in their own right, so this line is their
+# own average, not a quantity borrowed from a dataset the panel no longer
+# shows.
+_D_ONE_OUTPUT_REGIME = [("mvt", "nu"), ("mvt", "tail")]
+
+
+def _d_timing_load(timing_dir: str, dataset: str, estimator: str) -> dict:
+    """One (dataset, estimator) directory of the timing run, through the
+    same `_product_dir`/`_outputs`/`_load_draws` every other figure in
+    this file uses -- panel (a) reads no product the rest of the module
+    does not already know how to read."""
+    path = _product_dir(timing_dir, dataset, estimator)
+    truth = pd.read_parquet(os.path.join(path, "truth.parquet"))
+    outputs = _outputs(truth)
+    return _load_draws(path, outputs)
+
+
+def _d_timing_medians(loaded: dict) -> dict:
+    """The five medians panel (a) is built from, all taken PER DRAW before
+    medians are taken, not from the ratio of two separately-taken medians
+    (a slow or fast draw then contributes consistently to both terms of
+    `overhead`, rather than an arbitrary pairing across draws):
+
+      t_i         = wall_time_boot_i / B, the bootstrap's own per-draw
+                    wall time divided by its exactly-known B=2000
+                    evaluations -- exact, not fit, because B is fixed by
+                    `config.yaml`.
+      overhead_i  = wall_time_qij_i - normalized_rows_i * t_i, QIJ's own
+                    wall time on that same draw minus what its work would
+                    cost AT THAT DRAW'S OWN t_i -- "the quantizer and the
+                    influence model" (spec), whatever is left once the
+                    evaluations are charged at the bootstrap's unit price.
+
+    NORMALIZED ROWS, not `evals_total`, and the difference is not small.
+    `t_i` is the price of a FULL-DATA evaluation, because the bootstrap's
+    B are all full-data. QIJ's are not: its stage-1 evaluations run on the
+    M_X prototypes, not on N rows. Charging every one of QIJ's
+    evaluations at the full-data rate bills work it never did -- on the
+    IMF, 763 evaluations touching 434 full-data-equivalents of rows, so
+    329 evaluations at 0.105 s invented, about 35 s -- and the residual
+    went NEGATIVE, a median of about -4.3 s. `normalized_rows` is
+    precisely the full-data-equivalent count (cost layer 1, plan
+    section 8) and is what the bootstrap's unit price applies to.
+    Corrected, every overhead is positive and the four one-output
+    estimators fall in a 0.21-0.37 s band instead of scattering:
+
+      fp/fp         evals 542   rows 238.5   overhead 1.341 s
+      imf/imf             763        433.9           30.300
+      mvt/nu              242         71.3            0.349
+      mvt/tail            321        149.8            0.365
+      pareto/shape        230         58.8            0.285
+      pareto/tail         228         56.8            0.209
+
+    The IMF's 30.3 s is a real cost the old accounting hid behind a
+    pretended evaluation price: the quantizer and the influence model at
+    N = 2000 over 415 prototypes, plus -- the caption says this -- the
+    optimizer's own per-row cost differing between the prototypes and the
+    full data, which is the one place the single-rate model still bends.
+    The panel ILLUSTRATES the crossover; it does not measure it."""
+    t_i = loaded["wall_time_boot"] / _D_TIMING_B
+    overhead_i = loaded["wall_time_qij"] - loaded["normalized_rows"] * t_i
+    return dict(
+        t=float(np.median(t_i)),
+        wt_boot=float(np.median(loaded["wall_time_boot"])),
+        wt_qij=float(np.median(loaded["wall_time_qij"])),
+        n_evals=float(np.median(loaded["normalized_rows"])),
+        overhead=float(np.median(overhead_i)),
+    )
+
+
+def _d_regime(timing_dir: str, members: list) -> dict:
+    """One (overhead, n_evals) pair for a QIJ cost LINE, averaged over
+    `members` -- a list of (dataset, estimator) pairs, each reduced to its
+    own median overhead and evaluation count by `_d_timing_medians` first,
+    then averaged. The FP regime has one member; the one-output regime
+    averages `_D_ONE_OUTPUT_REGIME`'s four, so that line does not depend
+    on which single one-output estimator panel (a) happens to plot."""
+    meds = [_d_timing_medians(_d_timing_load(timing_dir, ds, est)) for ds, est in members]
+    return dict(overhead=float(np.mean([m["overhead"] for m in meds])),
+                n_evals=float(np.mean([m["n_evals"] for m in meds])))
+
+
+def _d_crossover(overhead: float, n_evals: float) -> float:
+    """The per-evaluation cost t* at which the bootstrap's B*t equals this
+    QIJ line's overhead + n_evals*t: B*t* = overhead + n_evals*t*, so
+    t* = overhead / (B - n_evals). Both regimes measured here have
+    n_evals well below B (255 and 542 against B=2000), so the denominator
+    is always positive; a hypothetical regime with n_evals >= B (QIJ
+    needing as many evaluations as the bootstrap's B) would have no
+    crossover at all, which this does not special-case because nothing in
+    this run reaches it."""
+    return overhead / (_D_TIMING_B - n_evals)
+
+
+def _log_span(values, include=(), pad: float = 0.15):
+    """`_data_span`'s counterpart for a log axis -- the same rule (a range
+    derived from what is actually drawn, padded only far enough to keep
+    `include` in view, never hardcoded), applied in log10 space so the
+    padding is a fraction of the log-range rather than of the linear range
+    a log axis is about to compress. `None` when nothing positive and
+    finite was passed, same convention as `_data_span`."""
+    vals = np.array([v for v in values if v is not None and np.isfinite(v) and v > 0], dtype=float)
+    if vals.size == 0:
+        return None
+    inc = [np.log10(v) for v in include if v is not None and np.isfinite(v) and v > 0]
+    span = _data_span(np.log10(vals), np.log10(vals), include=inc, pad=pad)
+    if span is None:
+        return None
+    return 10.0 ** span[0], 10.0 ** span[1]
+
+
+def _plot_d_pay(ax, timing_dir: str, panel_lbl: str) -> None:
+    """(a) When QIJ pays (spec, Figure D, corrected by the author 19
+    September 2026 to plot the four ESTIMATOR OBJECTS the paper's six
+    coordinates map to -- `_D_POINTS` -- rather than one estimator per
+    dataset, which had put Pareto, an estimator no other figure ever
+    shows, on this one). x the per-evaluation cost t (the bootstrap's own
+    wall time / B, `_d_timing_medians`), y wall time per run, both log.
+    The bootstrap's line, B*t; QIJ's line, overhead + n_evals*t -- but TWO
+    of these, not one, at the two overhead regimes the spec itself gives
+    ("about 0.25 s for a one-output estimator at 188 prototypes, about
+    1.3 s for the Fundamental Plane at 371 prototypes and four outputs"),
+    because they differ by about 5x and averaging them into a single line
+    would misplace every one-output estimator's crossover by roughly that
+    factor. Each line's own crossover (`_d_crossover`) is marked with a
+    black x where it falls inside the plotted range. The two theoretical
+    lines are tagged "1-output" and "FP model" in the panel itself -- "FP
+    model" rather than the bare "FP" the spec used, because the FP POINT
+    (one of the four estimators, `_D_POINTS`) is labelled "FP" too, and
+    the two are different things: one is this run's median wall time for
+    the FP estimator, the other is the overhead+rows*t line fitted to
+    "an estimator that quantizes to 371 prototypes and reports four
+    outputs" in general. The bare "FP" ran the line's tag straight through
+    the point's own marker in the first render.
+
+    Where the four points fall against the crossovers, this run's timing
+    medians (`_d_timing_medians`, boot/QIJ wall-time ratio in parens,
+    >1 favours QIJ):
+      MVT S_99   t=1.81e-4 s  -- essentially AT the one-output crossover
+                 (t*=1.89e-4 s), the two nearly coincide on the panel;
+                 ratio 0.92, bootstrap fractionally cheaper.
+      FP         t=2.07e-4 s  -- well below the FP line's own crossover
+                 (t*=7.62e-4 s); ratio 0.30, QIJ costs 3.3x the bootstrap.
+      MVT nu     t=5.27e-4 s  -- above the one-output crossover; ratio
+                 2.72, QIJ cheaper.
+      IMF        t=1.05e-1 s  -- far to the right of both crossovers;
+                 ratio 2.77, QIJ cheaper (its own overhead, ~30s, is
+                 mostly the optimizer's per-row cost on the prototypes,
+                 not the influence model -- the docstring on
+                 `_d_timing_medians` has the breakdown).
+    MVT S_99 sitting almost exactly on the one-output crossover, at nearly
+    the same (t, wall time) as the crossover's own x mark, is why that
+    label carries a leader line into open data-space rather than a bare
+    pixel offset from its own marker -- see `_LABEL_OFFSET`.
+    """
+    regime_one = _d_regime(timing_dir, _D_ONE_OUTPUT_REGIME)
+    regime_fp = _d_regime(timing_dir, [("fp", "fp")])
+    points = []
+    for spec in _D_POINTS:
+        loaded = _d_timing_load(timing_dir, spec["dataset"], spec["estimator"])
+        points.append(dict(label=spec["label"], **_d_timing_medians(loaded)))
+
+    x_span = _log_span([p["t"] for p in points], pad=0.18)
+    x_lo, x_hi = x_span
+    x_grid = np.geomspace(x_lo, x_hi, 200)
+
+    ax.plot(x_grid, _D_TIMING_B * x_grid, color=METHOD["boot"]["color"],
+            ls=METHOD["boot"]["ls"], lw=plt.rcParams["lines.linewidth"], zorder=2)
+
+    fs = _STATE["annotation_fontsize"]
+    # The theoretical lines' own tags sit at 62% of the log range, not at
+    # the right edge the module this replaces used: with the four points
+    # now mvt/nu, mvt/tail, fp/fp, imf/imf (below), x_hi is set by the
+    # IMF point (the largest t by two orders of magnitude), and a
+    # right-edge tag landed within a few points of IMF's own QIJ marker
+    # and its label. This far along the log range is clear of every
+    # point and every point label at this run's numbers -- verified by
+    # rendering, not assumed (55% put "FP model" close enough to the MVT
+    # nu label's own corner to read as one run-on phrase).
+    x_txt_frac = 0.62
+    for regime, tag in ((regime_one, "1-output"), (regime_fp, "FP model")):
+        y_grid = regime["overhead"] + regime["n_evals"] * x_grid
+        ax.plot(x_grid, y_grid, color=METHOD["qij"]["color"], ls=METHOD["qij"]["ls"],
+                lw=plt.rcParams["lines.linewidth"], zorder=2)
+        x_txt = x_lo * (x_hi / x_lo) ** x_txt_frac
+        y_txt = regime["overhead"] + regime["n_evals"] * x_txt
+        ax.text(x_txt, y_txt, f" {tag}", color=METHOD["qij"]["color"], fontsize=fs,
+                ha="left", va="bottom", clip_on=False)
+        t_star = _d_crossover(regime["overhead"], regime["n_evals"])
+        if x_lo <= t_star <= x_hi:
+            ax.plot(t_star, _D_TIMING_B * t_star, marker="x", color=METHOD["truth"]["color"],
+                    ms=5.5, mew=1.3, ls="none", zorder=4)
+
+    # Per-point label offsets, tuned against this run's actual numbers
+    # (`_plot_d_pay`'s own docstring). MVT S_99's marker pair (t=1.81e-4,
+    # wall time 0.36-0.39s) sits almost exactly ON the one-output
+    # crossover mark (t*=1.89e-4, 0.38s), and FP's own marker (t=2.07e-4)
+    # is barely further along in t -- three features inside 15% of each
+    # other in t, and MVT nu's own crossover (the FP line's, t*=7.6e-4)
+    # falls close to MVT nu's own marker in turn. That crowding is a real
+    # feature of the data (S_99 and, to a lesser extent, nu ARE close to
+    # a crossover) and the markers stay put; only the LABELS move, in
+    # DATA coordinates (`textcoords="data"`, not a pixel offset from each
+    # point's own marker) so their target can be chosen by what is
+    # actually open at this run's numbers: MVT S_99 into the "channel"
+    # between the two QIJ lines' plateaus (`one(t)` below, `fp(t)` above,
+    # evaluated by hand while tuning this), MVT nu ABOVE the FP line
+    # entirely, clear of its own crossover mark and of the "FP model"/
+    # "1-output" tags further out at `x_txt_frac`. FP and IMF keep simple
+    # point-relative offsets -- their own neighbourhoods are clear on
+    # this run.
+    _LABEL_OFFSET = {
+        r"MVT $S_{99}$": dict(xytext=(2.0e-3, 1.0), textcoords="data",
+                              ha="left", va="center",
+                              arrowprops=dict(arrowstyle="-", color="0.4", lw=0.6,
+                                               shrinkA=0, shrinkB=3)),
+        "FP": dict(xytext=(0, 8), textcoords="offset points", ha="center", va="bottom"),
+        r"MVT $\nu$": dict(xytext=(5.5e-4, 3.2), textcoords="data",
+                          ha="left", va="bottom"),
+        "IMF": dict(xytext=(-5, 6), textcoords="offset points", ha="right", va="bottom"),
+    }
+    for p in points:
+        ax.plot(p["t"], p["wt_boot"], marker=METHOD["boot"]["marker"],
+                color=METHOD["boot"]["color"], ls="none", zorder=3)
+        ax.plot(p["t"], p["wt_qij"], marker=METHOD["qij"]["marker"],
+                color=METHOD["qij"]["color"], ls="none", zorder=3)
+        y_top = max(p["wt_boot"], p["wt_qij"])
+        off = _LABEL_OFFSET[p["label"]]
+        ax.annotate(p["label"], (p["t"], y_top), fontsize=fs, clip_on=False, **off)
+
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlim(x_lo, x_hi)
+    y_span = _log_span([p["wt_boot"] for p in points] + [p["wt_qij"] for p in points], pad=0.22)
+    if y_span is not None:
+        ax.set_ylim(*y_span)
+    ax.set_xlabel(r"Time per evaluation $\mathbf{t}$ (s)", labelpad=2)
+    ax.set_ylabel("Wall time per run (s)")
+    ax.set_title(f"{panel_lbl} When QIJ pays")
+
+
+def _d_ratio_n(run_dirs: dict) -> dict:
+    """Median (with interquartile band) over draws of the WITHIN-DRAW
+    QIJ/bootstrap wall-time ratio, against N -- panel (b)'s y, corrected
+    by the author 19 September 2026 from absolute wall time (cost layer
+    2, `tables.py`'s module docstring: "wall time only as the ratio
+    QIJ/bootstrap within the same draw on the same worker, which cancels
+    the machine and its load"). The cost sweeps that fill `run_dirs` ran
+    45-100 workers to a node, so a draw's own wall time is contended by
+    whatever else that worker was running and is not comparable to
+    another draw's, let alone another run's -- an absolute second from
+    this data is the thing this file's OWN cost discipline forbids
+    plotting; only the timing run (one worker, one thread) earns panel
+    (a)'s absolute seconds. What a contended run CAN support is the ratio
+    `wall_time_qij[i] / wall_time_boot[i]` taken on the same draw i, same
+    worker, same contention at that instant, which cancels in the
+    quotient the way it does not cancel across draws. `_load_draws`
+    already pairs the two per draw (both read from the same estimator
+    directory's own products), so no join beyond that is needed here."""
     Ns = sorted(run_dirs)
-    rows_stat, time_stat, width_stat, cov_rows = [], [], [], []
-    outputs_ref, B_ref = None, None
+    med, p25, p75 = [], [], []
     for N in Ns:
         path = run_dirs[N]
         truth = pd.read_parquet(os.path.join(path, "truth.parquet"))
         outputs = _outputs(truth)
-        if outputs_ref is None:
-            outputs_ref = outputs
         loaded = _load_draws(path, outputs)
-        if B_ref is None:
-            B_ref = loaded["B"]
-
-        rows_stat.append(dict(N=N, **_stat(loaded["normalized_rows"])))
         with np.errstate(divide="ignore", invalid="ignore"):
-            tratio = loaded["wall_time_qij"] / loaded["wall_time_boot"]
-        time_stat.append(dict(N=N, **_stat(tratio)))
-
-        wratios = []
-        for j, o in enumerate(outputs):
-            cov_qij, cov_boot = _coverage_pair(loaded, j, level)
-            cov_rows.append(dict(N=N, output=o, p_qij=cov_qij["p"], se_qij=cov_qij["se"],
-                                  p_boot=cov_boot["p"], se_boot=cov_boot["se"]))
-            wratios.append(_width_ratio(loaded, j, level))
-        width_stat.append(dict(N=N, **_stat(np.concatenate(wratios))))
-    return dict(rows_stat=rows_stat, time_stat=time_stat, width_stat=width_stat,
-                cov_rows=cov_rows, outputs=outputs_ref, B_ref=B_ref)
+            ratio = loaded["wall_time_qij"] / loaded["wall_time_boot"]
+        s = _stat(ratio)
+        med.append(s["median"]); p25.append(s["p25"]); p75.append(s["p75"])
+    return dict(Ns=np.array(Ns, dtype=float), med=np.array(med),
+                p25=np.array(p25), p75=np.array(p75))
 
 
-def _d_series_imf(imf_run_dirs: dict, level: float,
-                   coverage_outputs=("slope", "Mstar", "p")) -> dict:
-    """The IMF sweep's series (spec: "coverage ... (slope, M*, p)" --
-    gamma_shape/gamma_scale are excluded here exactly as Pareto and FP
-    b/c are excluded from the fixed six, per the spec's own naming) plus
-    the two failure fractions the sweet-spot panel needs: the share of
-    bootstrap replicates that hit the IMF's box constraint (NaN) at each
-    N, and QIJ's own evaluation failure fraction at the same N -- "QIJ's
-    zero" in the spec is a claim about the data, so it is computed here,
-    not hardcoded."""
+def _plot_d_ratio_n(ax, fp_series: dict, imf_series, panel_lbl: str) -> None:
+    """(b) Cost against N, corrected by the author 19 September 2026 to
+    plot the within-draw QIJ/bootstrap wall-time RATIO rather than
+    absolute wall time -- `_d_ratio_n`'s own docstring has the cost-
+    discipline reason. One line per DATASET, not per method: the ratio
+    already IS the QIJ-vs-bootstrap comparison, so there is no second
+    method series left to draw here, and colour is free for the
+    Fundamental Plane (from `run_dirs`, the FP cost-vs-N sweep) and the
+    IMF (from `imf_run_dirs`, when the sweep is on the build), in
+    `_D_DATASET_COLOR`'s green/purple rather than the reserved method
+    colours -- named directly at each line's own right end, the same
+    idiom panel (c) uses, so this panel needs no legend of its own.
+
+    Why both lines belong here together (author, correcting the version
+    that plotted only the Fundamental Plane): that was the one dataset
+    where QIJ loses, so the panel by itself read as "QIJ is uniformly
+    more expensive". It is not -- the IMF sweep runs QIJ at roughly a
+    third of the bootstrap's wall time at every N it covers, the
+    Fundamental Plane the other way around, and the horizontal line at
+    1.0 is what makes both readable as a single "who pays, and when"
+    picture rather than two disconnected facts."""
+    fs = _STATE["annotation_fontsize"]
+    lo_all, hi_all = [], []
+    for key, series, label in (("fp", fp_series, "FP"), ("imf", imf_series, "IMF")):
+        if series is None:
+            continue
+        color = _D_DATASET_COLOR[key]
+        Ns = series["Ns"]
+        ax.fill_between(Ns, series["p25"], series["p75"], color=color, alpha=0.15, linewidth=0)
+        ax.plot(Ns, series["med"], color=color, ls="-", marker="o")
+        ax.text(Ns[-1], series["med"][-1], f" {label}", color=color, fontsize=fs,
+                ha="left", va="center")
+        lo_all.append(series["p25"]); hi_all.append(series["p75"])
+    ax.axhline(1.0, color=METHOD["truth"]["color"], ls=":", lw=1.0, zorder=1)
+    ax.set_xscale("log")
+    # 1.0 is the reference the panel exists to show, so it is always kept
+    # in view (`include=[1.0]`) even on a build where every N sits well
+    # above or below it -- the same rule `_row_panel`'s unity/nominal
+    # lines follow in Figures A and C.
+    if lo_all:
+        span = _data_span(np.concatenate(lo_all), np.concatenate(hi_all), include=[1.0])
+        if span is not None:
+            ax.set_ylim(*span)
+    ax.set_xlabel(r"$\mathbf{N}$", labelpad=2)
+    ax.set_ylabel("QIJ / Boot wall time")
+    ax.set_title(f"{panel_lbl} Cost vs $N$")
+
+
+def _d_fp_coverage_n(run_dirs: dict, level: float) -> dict:
+    """Coverage at `level` against N for both methods, the Fundamental
+    Plane's four outputs reduced to their mean with the min-to-max range
+    across them (spec: "the mean over its four outputs with a band
+    spanning the four") -- not a per-output MC-error band, which is a
+    different quantity the old F10(c) plotted and this design drops."""
+    Ns = sorted(run_dirs)
+    qij_mean, qij_lo, qij_hi = [], [], []
+    boot_mean, boot_lo, boot_hi = [], [], []
+    for N in Ns:
+        path = run_dirs[N]
+        truth = pd.read_parquet(os.path.join(path, "truth.parquet"))
+        outputs = _outputs(truth)
+        loaded = _load_draws(path, outputs)
+        cq, cb = [], []
+        for j in range(len(outputs)):
+            pq, pb = _coverage_pair(loaded, j, level)
+            cq.append(pq["p"]); cb.append(pb["p"])
+        cq, cb = np.array(cq), np.array(cb)
+        qij_mean.append(np.nanmean(cq)); qij_lo.append(np.nanmin(cq)); qij_hi.append(np.nanmax(cq))
+        boot_mean.append(np.nanmean(cb)); boot_lo.append(np.nanmin(cb)); boot_hi.append(np.nanmax(cb))
+    return dict(
+        Ns=np.array(Ns, dtype=float),
+        qij=dict(mean=np.array(qij_mean), lo=np.array(qij_lo), hi=np.array(qij_hi)),
+        boot=dict(mean=np.array(boot_mean), lo=np.array(boot_lo), hi=np.array(boot_hi)),
+    )
+
+
+def _d_imf_mstar_coverage_n(imf_run_dirs: dict, level: float, output: str = "Mstar") -> dict:
+    """Coverage at `level` against N for both methods, IMF's M* alone
+    (spec: "IMF M* as its own line ... the finite-sample effect vanishing
+    as N grows"), with its ordinary Monte-Carlo SE (`_coverage_pair`), the
+    same quantity Figure A's coverage panel uses."""
     Ns = sorted(imf_run_dirs)
-    time_stat, cov_rows, boot_fail, qij_fail = [], [], [], []
+    qij_p, qij_se, boot_p, boot_se = [], [], [], []
     for N in Ns:
         path = imf_run_dirs[N]
         truth = pd.read_parquet(os.path.join(path, "truth.parquet"))
         outputs = _outputs(truth)
+        if output not in outputs:
+            raise ValueError(f"{output!r} not among outputs {outputs} at N={N} under {path}")
+        j = outputs.index(output)
         loaded = _load_draws(path, outputs)
-
-        with np.errstate(divide="ignore", invalid="ignore"):
-            tratio = loaded["wall_time_qij"] / loaded["wall_time_boot"]
-        time_stat.append(dict(N=N, **_stat(tratio)))
-
-        for o in coverage_outputs:
-            if o not in outputs:
-                continue
-            j = outputs.index(o)
-            cov_qij, cov_boot = _coverage_pair(loaded, j, level)
-            cov_rows.append(dict(N=N, output=o, p_qij=cov_qij["p"], se_qij=cov_qij["se"],
-                                  p_boot=cov_boot["p"], se_boot=cov_boot["se"]))
-
-        n_draws = len(loaded["s"])
-        boot_total = loaded["B"] * n_draws
-        boot_fail.append(dict(N=N, frac=float(np.sum(loaded["n_failed_boot"])) / boot_total
-                               if boot_total else float("nan")))
-        evals_total = float(np.sum(loaded["evals_total"]))
-        qij_fail.append(dict(N=N, frac=float(np.sum(loaded["n_failed_qij"])) / evals_total
-                              if evals_total > 0 else float("nan")))
-    return dict(time_stat=time_stat, cov_rows=cov_rows, boot_fail=boot_fail, qij_fail=qij_fail,
-                coverage_outputs=[o for o in coverage_outputs])
+        pq, pb = _coverage_pair(loaded, j, level)
+        qij_p.append(pq["p"]); qij_se.append(pq["se"])
+        boot_p.append(pb["p"]); boot_se.append(pb["se"])
+    return dict(
+        Ns=np.array(Ns, dtype=float),
+        qij=dict(p=np.array(qij_p), se=np.array(qij_se)),
+        boot=dict(p=np.array(boot_p), se=np.array(boot_se)),
+    )
 
 
-def _raise_primary_axis(ax, ax2) -> None:
-    """`ax.twinx()` stacks the new axes `ax2` ABOVE `ax` by default, so
-    anything `ax2` draws -- including a line whose only job is to sit
-    under a legend -- paints over a legend attached to `ax`. Every panel
-    below puts its combined legend on `ax`, so this is called right after
-    each `twinx()` to swap the stacking order back, once, rather than
-    fighting z-order per-artist."""
-    ax.set_zorder(ax2.get_zorder() + 1)
-    ax.patch.set_visible(False)
+def _plot_d_accuracy(ax, fp_series: dict, imf_series, level: float, panel_lbl: str) -> None:
+    """(c) Accuracy against N (spec, Figure D). Coverage at `level` for
+    both methods, FP (mean over its four outputs with a min-max band
+    across them) and, when supplied, IMF M* (its own ordinary Monte-Carlo
+    band, `_coverage_pair`'s SE).
 
+    Colour recoloured by the author 19 September 2026 to mark the
+    DATASET, not the method (`_D_DATASET_COLOR`: FP green, IMF purple).
+    Before, both series were `METHOD["qij"]["color"]`/`["boot"]["color"]`
+    -- the same blue and vermillion every other panel uses -- so FP and
+    IMF were the same two colours as each other, told apart only by an
+    end label and a marker fill, and their coverage bands overlap through
+    most of the N range each sweep covers. Method now rides on line style
+    and marker shape alone (`METHOD["qij"]["ls"]`/`["marker"]`, still
+    solid circle for QIJ and dashed square for Boot, just without their
+    reserved colour in this one panel) -- the figure's single legend
+    (`fig_d`, drawn on panel (a) where the reserved colours ARE used)
+    is what teaches that shape/style pairing; here it is applied, not
+    re-explained. Each dataset is still named directly at its own right
+    end, the idiom style guide section 6/F4 uses for `d_eff`, rather than
+    a second legend."""
+    fs = _STATE["annotation_fontsize"]
+    Ns_fp = fp_series["Ns"]
+    fp_color = _D_DATASET_COLOR["fp"]
+    lo_all, hi_all = [], []
+    for key in ("boot", "qij"):
+        kw, s = METHOD[key], fp_series[key]
+        ax.fill_between(Ns_fp, s["lo"], s["hi"], color=fp_color, alpha=0.15, linewidth=0)
+        ax.plot(Ns_fp, s["mean"], color=fp_color, ls=kw["ls"], marker=kw["marker"])
+        lo_all.append(s["lo"]); hi_all.append(s["hi"])
+    ax.text(Ns_fp[-1], fp_series["qij"]["mean"][-1], " FP", color=fp_color,
+            fontsize=fs, ha="left", va="center")
 
-def _plot_d_cost(ax, series: dict, panel_lbl: str) -> None:
-    """(a) normalized rows vs N (QIJ median/IQR, bootstrap's fixed-B
-    reference) on the left axis; the QIJ/bootstrap wall-time ratio
-    (median/IQR) on a twin right axis in a neutral third colour -- it is a
-    ratio, not a second method, so it gets neither the QIJ nor the
-    bootstrap hue (style guide section 1: never let one hue mean two
-    things)."""
-    rows_stat, time_stat, B_ref = series["rows_stat"], series["time_stat"], series["B_ref"]
-    Ns = np.array([r["N"] for r in rows_stat], dtype=float)
-    med = np.array([r["median"] for r in rows_stat])
-    p25 = np.array([r["p25"] for r in rows_stat])
-    p75 = np.array([r["p75"] for r in rows_stat])
-    ax.fill_between(Ns, p25, p75, color=METHOD["qij"]["color"], alpha=0.18, linewidth=0)
-    ax.plot(Ns, med, color=METHOD["qij"]["color"], ls=METHOD["qij"]["ls"],
-            marker=METHOD["qij"]["marker"], label="Normalized rows (QIJ)")
-    if B_ref is not None:
-        ax.axhline(B_ref, color=METHOD["boot"]["color"], ls=METHOD["boot"]["ls"], lw=1.2,
-                   label="Boot (fixed $B$)")
-    ax.set_xscale("log")
-    ax.set_yscale("log")
-    ax.set_xlabel("$N$")
-    ax.set_ylabel("Normalized rows")
+    if imf_series is not None:
+        Ns_imf = imf_series["Ns"]
+        imf_color = _D_DATASET_COLOR["imf"]
+        for key in ("boot", "qij"):
+            kw, s = METHOD[key], imf_series[key]
+            band = np.where(np.isfinite(s["se"]), 1.96 * s["se"], 0.0)
+            ax.fill_between(Ns_imf, s["p"] - band, s["p"] + band, color=imf_color,
+                            alpha=0.12, linewidth=0)
+            ax.plot(Ns_imf, s["p"], color=imf_color, ls=kw["ls"], marker=kw["marker"])
+            lo_all.append(s["p"] - band); hi_all.append(s["p"] + band)
+        ax.text(Ns_imf[-1], imf_series["qij"]["p"][-1], " IMF $M_*$", color=imf_color,
+                fontsize=fs, ha="left", va="center")
 
-    ax2 = ax.twinx()
-    tN = np.array([r["N"] for r in time_stat], dtype=float)
-    tmed = np.array([r["median"] for r in time_stat])
-    tp25 = np.array([r["p25"] for r in time_stat])
-    tp75 = np.array([r["p75"] for r in time_stat])
-    ax2.fill_between(tN, tp25, tp75, color=SECONDARY, alpha=0.12, linewidth=0)
-    ax2.plot(tN, tmed, color=SECONDARY, ls="-.", marker="D", ms=3.2,
-             label="Wall-time ratio (QIJ/boot)")
-    ax2.set_yscale("log")
-    ax2.set_ylabel("Wall-time ratio", color=SECONDARY, labelpad=9)
-    ax2.tick_params(axis="y", colors=SECONDARY)
-    _raise_primary_axis(ax, ax2)
-
-    h1, l1 = ax.get_legend_handles_labels()
-    h2, l2 = ax2.get_legend_handles_labels()
-    _legend(ax, handles=h1 + h2, loc="lower right", fontsize=plt.rcParams["legend.fontsize"] * 0.7,
-            handlelength=1.4, labelspacing=0.3, borderpad=0.4)
-    ax.set_title("Cost vs $N$")
-    _panel_label(ax, panel_lbl, dx=-0.22)
-
-
-def _plot_d_coverage(ax, cov_rows: list, outputs: list, level: float, panel_lbl: str,
-                      width_stat: list = None) -> None:
-    """Coverage of both intervals vs N, one thin line per (output,
-    method) with a per-output MC-error band -- pooling across outputs
-    would be tighter than the FP's shared run and bins have earned (the
-    same ruling the module this replaces made for old F10(c)). When
-    `width_stat` is given (the FP row only; the spec names width ratio
-    for panel (b), not for the IMF coverage panel (c)), the median width
-    ratio is added on a twin axis."""
-    Ns_all = sorted(set(r["N"] for r in cov_rows))
-    lw = plt.rcParams["lines.linewidth"]
-    cov_lo, cov_hi = [], []      # the band edges actually drawn, for the range
-    for i, o in enumerate(outputs):
-        color = OUTPUT_COLORS[i % len(OUTPUT_COLORS)]
-        for method, ls, marker, kp, ks in (
-            ("qij", "-", "o", "p_qij", "se_qij"), ("boot", "--", "s", "p_boot", "se_boot"),
-        ):
-            xs, ys, ses = [], [], []
-            for N in Ns_all:
-                match = [r for r in cov_rows if r["N"] == N and r["output"] == o]
-                if not match:
-                    continue
-                xs.append(N)
-                ys.append(match[0][kp])
-                ses.append(match[0][ks])
-            xs_a, ys_a, ses_a = np.array(xs, dtype=float), np.array(ys, dtype=float), np.array(ses, dtype=float)
-            band = np.where(np.isfinite(ses_a), 1.96 * ses_a, 0.0)
-            ax.fill_between(xs_a, ys_a - band, ys_a + band, color=color, alpha=0.10, linewidth=0)
-            ax.plot(xs_a, ys_a, color=color, ls=ls, marker=marker, ms=3, lw=lw * 0.8)
-            cov_lo.append(ys_a - band)
-            cov_hi.append(ys_a + band)
     ax.axhline(level, color=METHOD["truth"]["color"], ls=":", lw=1.0)
     ax.set_xscale("log")
-    # Derived from the coverage series and their Monte-Carlo bands, with the
-    # nominal level kept in view; not the old fixed (0.5, 1.02), which put
-    # half the panel below anything ever plotted in it.
-    cov_span = _data_span(np.concatenate(cov_lo) if cov_lo else [],
-                          np.concatenate(cov_hi) if cov_hi else [], include=[level])
-    if cov_span is not None:
-        ax.set_ylim(*cov_span)
-    ax.set_xlabel("$N$")
+    span = _data_span(np.concatenate(lo_all), np.concatenate(hi_all), include=[level])
+    if span is not None:
+        ax.set_ylim(*span)
+    ax.set_xlabel(r"$\mathbf{N}$", labelpad=2)
     ax.set_ylabel(f"Coverage at {level:.0%}")
-
-    if width_stat is not None:
-        ax2 = ax.twinx()
-        wN = np.array([r["N"] for r in width_stat], dtype=float)
-        wmed = np.array([r["median"] for r in width_stat])
-        ax2.plot(wN, wmed, color=SECONDARY, ls="-.", marker="D", ms=3.2,
-                 label="Width ratio (QIJ/boot)")
-        ax2.axhline(1.0, color=SECONDARY, ls=":", lw=0.8)
-        ax2.set_ylabel("Width ratio", color=SECONDARY, labelpad=9)
-        ax2.tick_params(axis="y", colors=SECONDARY)
-        ax2.yaxis.set_major_locator(plt.MaxNLocator(3))
-        _raise_primary_axis(ax, ax2)
-
-    # Compact legend: one swatch per output (colour identifies it) plus
-    # the method linestyle/marker convention, stated once.
-    out_handles = [Line2D([], [], color=OUTPUT_COLORS[i % len(OUTPUT_COLORS)], ls="-",
-                          label=o) for i, o in enumerate(outputs)]
-    method_handles = [Line2D([], [], color="#666666", ls=METHOD[k]["ls"],
-                              marker=METHOD[k]["marker"], ms=3, label=METHOD[k]["label"])
-                       for k in ("qij", "boot")]
-    _legend(ax, handles=out_handles + method_handles, loc="lower left",
-            ncol=2, fontsize=plt.rcParams["legend.fontsize"] * 0.7)
-    ax.set_title("Reliability vs $N$")
-    _panel_label(ax, panel_lbl, dx=-0.22)
+    ax.set_title(f"{panel_lbl} Accuracy vs $N$")
 
 
-def _plot_d_sweet_spot(ax, series_imf: dict, panel_lbl: str) -> None:
-    """The IMF sweet-spot panel: wall-time ratio vs N on the left axis
-    (where QIJ's cost advantage over the bootstrap grows), and, on a twin
-    right axis, the fraction of bootstrap replicates that hit the box
-    constraint at that N against QIJ's own (near-zero, per the package
-    plan's rare-support finding, but measured here rather than assumed)."""
-    time_stat = series_imf["time_stat"]
-    Ns = np.array([r["N"] for r in time_stat], dtype=float)
-    med = np.array([r["median"] for r in time_stat])
-    p25 = np.array([r["p25"] for r in time_stat])
-    p75 = np.array([r["p75"] for r in time_stat])
-    ax.fill_between(Ns, p25, p75, color=METHOD["qij"]["color"], alpha=0.15, linewidth=0)
-    ax.plot(Ns, med, color=METHOD["qij"]["color"], ls="-", marker="o", ms=3.5,
-            label="Wall-time ratio (QIJ/boot)")
-    ax.axhline(1.0, color=METHOD["truth"]["color"], ls=":", lw=1.0)
-    ax.set_xscale("log")
-    ax.set_yscale("log")
-    ax.set_xlabel("$N$")
-    ax.set_ylabel("Wall-time ratio")
-
-    ax2 = ax.twinx()
-    bN = [r["N"] for r in series_imf["boot_fail"]]
-    bfrac = [r["frac"] for r in series_imf["boot_fail"]]
-    qN = [r["N"] for r in series_imf["qij_fail"]]
-    qfrac = [r["frac"] for r in series_imf["qij_fail"]]
-    ax2.plot(bN, [100.0 * f for f in bfrac], color=METHOD["boot"]["color"], ls="--", marker="s",
-             ms=3.2, label="Boot at box constraint")
-    ax2.plot(qN, [100.0 * f for f in qfrac], color=METHOD["qij"]["color"], ls=":", marker="o",
-             ms=2.8, label="QIJ at box constraint")
-    ax2.set_ylim(bottom=0)
-    # Percent, not a bare fraction: "0.16%" is half the character width of
-    # "0.0016" at this panel's tiny right-margin allowance, and the
-    # earlier fraction-formatted ticks clipped against the figure edge
-    # even with generous labelpad.
-    ax2.set_ylabel("At constraint (%)", color=METHOD["boot"]["color"], labelpad=7)
-    ax2.tick_params(axis="y", colors=METHOD["boot"]["color"])
-    ax2.yaxis.set_major_locator(plt.MaxNLocator(3))
-    _raise_primary_axis(ax, ax2)
-
-    h1, l1 = ax.get_legend_handles_labels()
-    h2, l2 = ax2.get_legend_handles_labels()
-    _legend(ax, handles=h1 + h2, loc="upper left", fontsize=plt.rcParams["legend.fontsize"] * 0.8)
-    ax.set_title("IMF sweet spot")
-    _panel_label(ax, panel_lbl, dx=-0.22)
-
-
-def fig_d(run_dirs: dict, imf_run_dirs: dict = None,
+def fig_d(run_dirs: dict, timing_dir: str, imf_run_dirs: dict = None,
           level: float = _LEVEL) -> plt.Figure:
-    """Figure D -- cost against sample size (spec section "Figure D",
-    design unchanged from F10). `run_dirs` maps N -> the Fundamental
-    Plane cost-vs-N product directory for that N (as F10 took it: no
-    product records N, so the caller supplies the mapping,
-    `scripts/make_figures.py`'s `_cost_dirs` builds it by globbing).
+    """Figure D -- cost (spec section "Figure D", redesigned by the author
+    19 September 2026, replaces F10 entirely; panels (a), (b) and (c)'s
+    colours corrected in a second pass, same date, after the author found
+    the render unreadable -- see each panel function's own docstring for
+    what changed and why). 1x3 panels at full width, one measure per
+    panel, ONE legend for the whole figure, no printed numbers inside the
+    panels.
 
-    (a) normalized rows and the QIJ/bootstrap wall-time ratio against N.
-    (b) coverage of both intervals against N, one thin line per FP output
-    with per-output MC bands, and the width ratio.
+    `run_dirs`: {N: product_dir} for the Fundamental Plane cost-vs-N
+    sweep -- panel (b)'s FP line and FP's half of panel (c) -- built the
+    same way `scripts/make_figures.py`'s `_cost_dirs` already builds it
+    (globbing for `N<size>/truth.parquet`).
+    `timing_dir`: the timing run's root (20 draws, one worker one thread,
+    `<root>/<dataset>/<estimator>/`) -- panel (a)'s only input; the one
+    place in this file that ever reads or plots an absolute wall time
+    (`_d_ratio_n`'s docstring explains why panel (b) does not, any more).
+    `imf_run_dirs`: optional {N: product_dir} for an IMF cost-vs-N sweep;
+    when given, it supplies panel (b)'s IMF ratio line AND panel (c)'s
+    IMF M* coverage line -- one input feeding both panels now, where
+    before only panel (c) read it. Both panels degrade gracefully to
+    their Fundamental-Plane-only form when it is omitted.
 
-    `imf_run_dirs`, optional, is the same kind of mapping for an IMF
-    cost-vs-N sweep; when given, a second row is added: (c) coverage of
-    both intervals for the IMF's slope/M*/p against N, and (d) the
-    wall-time ratio against N together with the fraction of bootstrap
-    replicates hitting the box constraint at each N and QIJ's own (the
-    "sweet-spot" panel). Layout and figsize both key off whether
-    `imf_run_dirs` is given (1x2 at (4.80, 2.20) without it, 2x2 at
-    (4.80, 3.60) with it, style guide section 8, 19 September) -- there is
-    no partial state where the IMF row exists without its own figsize.
+    (a) When QIJ pays -- `_plot_d_pay`: the four ESTIMATOR OBJECTS the
+        paper's six coordinates map to (mvt/nu, mvt/tail, fp/fp,
+        imf/imf), not one estimator per dataset -- Pareto, which no
+        other figure shows, is gone.
+    (b) Cost against N -- `_plot_d_ratio_n`: the within-draw QIJ/
+        bootstrap wall-time RATIO against N, not absolute wall time --
+        the cost sweeps are contended (45-100 workers to a node), so
+        only the ratio within a draw is a defensible quantity from them.
+        One line per dataset (FP, IMF), both plotted together so the
+        panel does not read as "QIJ is uniformly more expensive" from
+        the one dataset (FP) where it is.
+    (c) Accuracy against N -- `_plot_d_accuracy`: FP and IMF M* recoloured
+        apart (green/purple, `_D_DATASET_COLOR`) instead of sharing QIJ's
+        blue; method now carried by line style and marker shape alone.
+
+    Dropped from the old design (spec): the width ratio against N and the
+    bound-hit fractions against N, each one sentence in the text rather
+    than a plotted series. The old design's twin-axis machinery that drew
+    them (`_raise_primary_axis`, `OUTPUT_COLORS`, `SECONDARY`) is removed
+    with them -- nothing in this rebuild needs a twin axis at all.
     """
     _use_style()
-    has_imf = bool(imf_run_dirs)
-    if has_imf:
-        figsize = FIGSIZE_D2_LNCS
-        nrows = 2
-    else:
-        figsize = FIGSIZE_D1_LNCS
-        nrows = 1
-    fig, axes = plt.subplots(nrows, 2, figsize=figsize, squeeze=False, constrained_layout=False)
+    figsize = FIGSIZE_D_LNCS
+    fig, axes = plt.subplots(1, 3, figsize=figsize, constrained_layout=False)
 
-    series_fp = _d_series_fp(run_dirs, level)
-    _plot_d_cost(axes[0, 0], series_fp, "(a)")
-    _plot_d_coverage(axes[0, 1], series_fp["cov_rows"], series_fp["outputs"], level, "(b)",
-                      width_stat=series_fp["width_stat"])
+    _plot_d_pay(axes[0], timing_dir, "a.")
 
-    if has_imf:
-        series_imf = _d_series_imf(imf_run_dirs, level)
-        _plot_d_coverage(axes[1, 0], series_imf["cov_rows"], series_imf["coverage_outputs"],
-                          level, "(c)", width_stat=None)
-        _plot_d_sweet_spot(axes[1, 1], series_imf, "(d)")
+    fp_ratio = _d_ratio_n(run_dirs)
+    imf_ratio = _d_ratio_n(imf_run_dirs) if imf_run_dirs else None
+    _plot_d_ratio_n(axes[1], fp_ratio, imf_ratio, "b.")
 
-    if has_imf:
-        fig.subplots_adjust(left=0.09, right=0.80, top=0.90, bottom=0.10,
-                            hspace=0.85, wspace=1.05)
-    else:
-        fig.subplots_adjust(left=0.10, right=0.80, top=0.86, bottom=0.22, wspace=1.00)
+    fp_cov = _d_fp_coverage_n(run_dirs, level)
+    imf_cov = _d_imf_mstar_coverage_n(imf_run_dirs, level) if imf_run_dirs else None
+    _plot_d_accuracy(axes[2], fp_cov, imf_cov, level, "c.")
+
+    fig.subplots_adjust(left=0.085, right=0.98, top=0.88, bottom=0.20, wspace=0.45)
+
+    # ONE legend for the whole figure -- QIJ/Boot markers in their
+    # reserved colours, moved to panel (a) (was panel (b), in the design
+    # this replaces): panel (a) is now the only panel actually drawn in
+    # those two colours, since panels (b) and (c) both recolour by
+    # dataset instead (their own docstrings). Panels (b) and (c) name
+    # their series directly at each line's end rather than repeating a
+    # second legend, so this is still the figure's only one. Placed
+    # lower right, below the bootstrap line's own descent toward small t:
+    # every line and every point here sits at or above roughly 0.1s, and
+    # the bootstrap line does not cross below that until well past the
+    # smallest plotted t, so the panel's bottom right corner has nothing
+    # in it at this run's numbers -- checked by rendering, not assumed
+    # (`upper left`, tried first, sat on top of the MVT nu label and the
+    # QIJ lines' own low-t plateau, which is NOT flat at zero the way an
+    # empty log-log corner would be).
+    handles = [Line2D([], [], color=METHOD[k]["color"], ls=METHOD[k]["ls"],
+                       marker=METHOD[k]["marker"], label=METHOD[k]["label"])
+               for k in ("qij", "boot")]
+    _legend(axes[0], handles=handles, loc="lower right", bbox_to_anchor=(1.03, -0.03),
+            ncol=2, columnspacing=0.8, frameon=True, framealpha=0.9,
+            borderaxespad=0.1, borderpad=0.25, handlelength=1.4, handletextpad=0.3,
+            fontsize=plt.rcParams["legend.fontsize"])
     return fig

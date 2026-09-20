@@ -38,6 +38,18 @@ MVT_NU = 5.0
 IMF_TAU = 0.176609
 IMF_BOUNDS = ((-10.0, -0.01), (1.0, 200.0), (0.1, 20.0))
 
+# ---- Chabrier IMF (estimators.Chabrier): a candidate replacement for
+# `IMF`, not wired into `study._DATASET_ESTIMATORS`. m_b is Chabrier's
+# own break; m_min is the shipped stars.h5 pool's own minimum mass
+# (`_imf_pool().min()`), fixed here exactly the way `IMF_TAU` is fixed
+# from a full-pool fit -- never a draw's own minimum, which would make
+# the normalization depend on which points a resample happened to keep.
+# `CHABRIER_BOUNDS` is the (m_c, sigma, x) optimizer box, parallel to
+# `IMF_BOUNDS`.
+CHABRIER_M_B = 1.0
+CHABRIER_M_MIN = 0.0017582750879228115
+CHABRIER_BOUNDS = ((0.01, 5.0), (0.02, 5.0), (0.05, 10.0))
+
 _PARAMETRIC_TRUTH = {
     ('pareto', 'shape'): np.array([PARETO_ALPHA]),
     ('pareto', 'tail'): np.array([0.01]),   # P(X > F^-1(0.99)) = 0.01 by construction
@@ -123,4 +135,9 @@ def truth(dataset: str, estimator: str) -> np.ndarray:
     if key == ('imf', 'imf'):
         pool = _imf_pool()
         T = _est.IMF(tau=IMF_TAU, bounds=IMF_BOUNDS)
+        return T(pool, np.ones(len(pool)))
+    if key == ('imf', 'chabrier'):
+        pool = _imf_pool()
+        T = _est.Chabrier(m_min=CHABRIER_M_MIN, m_b=CHABRIER_M_B,
+                           bounds=CHABRIER_BOUNDS)
         return T(pool, np.ones(len(pool)))

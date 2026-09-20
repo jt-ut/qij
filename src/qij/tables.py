@@ -54,6 +54,7 @@ import pandas as pd
 import yaml
 
 from qij.core.intervals import percentile_interval, qij_interval
+from qij.estimators import supports_for
 
 __all__ = ["t1", "coverage_grid", "cost_table"]
 
@@ -151,16 +152,20 @@ def _load_draws(estimator_dir, outputs):
 def _compute_intervals(loaded, level):
     """The QIJ and bootstrap intervals at `level`, one row per draw,
     recomputed from the arrays `_load_draws` returned:
-    `qij_interval(theta_hat, V_tot_hat, a_bca, level)` and
-    `percentile_interval(theta_bootstrap, level)`. Loop over draws only
-    (<= S), never over N."""
+    `qij_interval(theta_hat, V_tot_hat, a_bca, level, support)` and
+    `percentile_interval(theta_bootstrap, level)`. `support` (q, 2) is
+    `estimators.supports_for(loaded["outputs"])`, each output's natural
+    parameter support, clipping the QIJ interval into it (the bootstrap's
+    percentile interval is never clipped). Loop over draws only (<= S),
+    never over N."""
     theta_hat = loaded["theta_hat"]
     n, q = theta_hat.shape
+    support = supports_for(loaded["outputs"])
     qij_lo_hi = np.full((n, q, 2), np.nan)
     bootstrap_lo_hi = np.full((n, q, 2), np.nan)
     for i in range(n):
         qij_lo_hi[i] = qij_interval(theta_hat[i], loaded["v_tot_hat"][i],
-                                     loaded["a_bca"][i], level)
+                                     loaded["a_bca"][i], level, support=support)
         bootstrap_lo_hi[i] = percentile_interval(loaded["theta_bootstrap"][i], level)
     return qij_lo_hi, bootstrap_lo_hi
 

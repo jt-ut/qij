@@ -8,12 +8,17 @@ no estimator is re-run, no dataset is redrawn.
 `<run_dir>` (a main or smoke run) supplies Figure A, Figure B and Figure C
 directly -- Figure C's 19 September redesign measures both methods
 against the truth in evaluation-cost units, so it no longer needs a
-separate timing run. Figure D needs
-the cost-vs-N study's per-N products (`--cost-vs-n`), and, optionally, an
-IMF cost-vs-N sweep (`--cost-vs-n-imf`) to add its sweet-spot row --
-`_cost_dirs` finds the `N<size>` directories under each by globbing for
+separate timing run (the reason `--timing-dir` below is Figure D's flag
+alone). Figure D needs the cost-vs-N study's per-N products
+(`--cost-vs-n`), and, optionally, an IMF cost-vs-N sweep
+(`--cost-vs-n-imf`) for its accuracy panel's IMF M* line -- `_cost_dirs`
+finds the `N<size>` directories under each by globbing for
 `truth.parquet`, the same layout `study.py`'s multi-N runs write, one
-(dataset, estimator) pair per root.
+(dataset, estimator) pair per root. Figure D's 19 September redesign also
+needs the timing run (`--timing-dir`, 20 single-worker single-thread
+draws, `<root>/<dataset>/<estimator>/`) for its new "when QIJ pays" panel
+-- the one panel in this whole CLI that reads wall time as its subject
+rather than as a byproduct, so it is the one panel that needs this flag.
 
 `--out-dir` overrides where the `figures/` directory is written (default:
 alongside each source run, matching the old CLI's behaviour). This exists
@@ -68,7 +73,13 @@ def main() -> None:
     parser.add_argument("--cost-vs-n", type=str, default=None,
                         help="products directory from a cost_vs_n.yaml study run (Fundamental Plane), for Figure D")
     parser.add_argument("--cost-vs-n-imf", type=str, default=None,
-                        help="products directory from an IMF cost_vs_n run, for Figure D's optional IMF sweep row")
+                        help="products directory from an IMF cost_vs_n run, for Figure D's "
+                             "accuracy panel's optional IMF M* line")
+    parser.add_argument("--timing-dir", type=str, default=None,
+                        help="products directory from the timing study (20 single-worker, "
+                             "single-thread draws per dataset/estimator) -- Figure D's own "
+                             "panel (a) alone; Figure C's 19 September redesign dropped this "
+                             "package's other use of a timing run, so nothing else reads it")
     parser.add_argument("--out-dir", type=str, default=None,
                         help="write figures/ here instead of alongside each source run "
                              "(use a scratch directory for a smoke rendering)")
@@ -84,9 +95,12 @@ def main() -> None:
     _save(fig_c, args.out_dir or args.run_dir, "fig_c")
 
     if args.cost_vs_n:
+        if not args.timing_dir:
+            parser.error("--timing-dir is required together with --cost-vs-n: Figure D's "
+                         "'when QIJ pays' panel reads it and nothing else in this figure does")
         cost_dirs = _cost_dirs(args.cost_vs_n)
         imf_cost_dirs = _cost_dirs(args.cost_vs_n_imf) if args.cost_vs_n_imf else None
-        fig_d = figures.fig_d(cost_dirs, imf_run_dirs=imf_cost_dirs)
+        fig_d = figures.fig_d(cost_dirs, args.timing_dir, imf_run_dirs=imf_cost_dirs)
         _save(fig_d, args.out_dir or args.cost_vs_n, "fig_d")
 
 

@@ -80,7 +80,18 @@ _DATASET_ESTIMATORS = {
     'pareto': {'shape': _est.pareto_shape, 'tail': _est.pareto_tail},
     'mvt': {'nu': _est.mvt_nu, 'tail': _est.mvt_tail},
     'fp': {'fp': _est.fp},
-    'imf': {'imf': _est.IMF(tau=_datasets.IMF_TAU, bounds=_datasets.IMF_BOUNDS)},
+    # The `imf` DATASET carries two estimators of the same STARFORGE
+    # masses: `imf`, the two-regime gamma/generalized-Schechter fit the
+    # study has used throughout, and `chabrier`, the lognormal-plus-power
+    # law candidate (20 September). They share the draw -- `datasets.imf`
+    # depends only on (N, seed) -- so at a common master_seed the two
+    # estimators see identical data and are directly comparable draw for
+    # draw. Their outputs differ entirely, so a bootstrap stored for one
+    # is NOT reusable for the other.
+    'imf': {'imf': _est.IMF(tau=_datasets.IMF_TAU, bounds=_datasets.IMF_BOUNDS),
+            'chabrier': _est.Chabrier(m_min=_datasets.CHABRIER_M_MIN,
+                                       m_b=_datasets.CHABRIER_M_B,
+                                       bounds=_datasets.CHABRIER_BOUNDS)},
 }
 
 # The MVT's standardization, passed to `QIJ` for the MVT draws only
